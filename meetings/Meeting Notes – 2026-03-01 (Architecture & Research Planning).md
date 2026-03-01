@@ -144,12 +144,12 @@ Build a **Proof of Concept (POC)** for the full voice pipeline to validate feasi
 
 | Done? | Item                          | Responsible | Due Date    |
 | ----- | ----------------------------- | ----------- | ----------- |
-|       | Research STT options          | Sahil       | This week   |
-|       | Research TTS options          | Sahil       | This week   |
-|       | Research routing approach     | Sunil       | This week   |
-|       | Research LLM SDK integration  | Sunil       | This week   |
-|       | Share daily findings          | Both        | Daily       |
-|       | Build end-to-end POC pipeline | Both        | End of week |
+|  ☑    | Research STT options          | Sahil       | This week   |
+|  ☐    | Research TTS options          | Sahil       | This week   |
+|  ☐    | Research routing approach     | Sunil       | This week   |
+|  ☐    | Research LLM SDK integration  | Sunil       | This week   |
+|  ☐    | Share daily findings          | Both        | Daily       |
+|  ☐    | Build end-to-end POC pipeline | Both        | End of week |
 
 ---
 
