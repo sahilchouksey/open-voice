@@ -2,10 +2,10 @@
 
 ## Meeting Information
 
-**Meeting Date/Time:** March 1, 2026 | 2:00 PM – 3:00 PM IST
-**Meeting Purpose:** Initial architectural discussion and research planning for Open Voice project
-**Meeting Location:** Google Meet
-**Note Taker:** Sunil Vishwakarma
+**Meeting Date/Time:** March 1, 2026 | 2:00 PM – 3:00 PM IST \
+**Meeting Purpose:** Initial architectural discussion and research planning for Open Voice project \
+**Meeting Location:** Google Meet \
+**Note Taker:** Sunil Vishwakarma 
 
 ## Repository
 
