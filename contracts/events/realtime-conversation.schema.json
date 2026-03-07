@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-voice.dev/contracts/events/realtime-conversation.schema.json",
+  "title": "Open Voice Realtime Conversation Events",
+  "description": "Typed event vocabulary for the Open Voice realtime conversation runtime.",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/sessionCreatedEvent" },
+    { "$ref": "#/$defs/sessionReadyEvent" },
+    { "$ref": "#/$defs/sttPartialEvent" },
+    { "$ref": "#/$defs/sttFinalEvent" },
+    { "$ref": "#/$defs/routeSelectedEvent" },
+    { "$ref": "#/$defs/llmTokenEvent" },
+    { "$ref": "#/$defs/llmCompletedEvent" },
+    { "$ref": "#/$defs/ttsChunkEvent" },
+    { "$ref": "#/$defs/ttsCompletedEvent" },
+    { "$ref": "#/$defs/conversationInterruptedEvent" },
+    { "$ref": "#/$defs/errorEvent" },
+    { "$ref": "#/$defs/sessionClosedEvent" }
+  ],
+  "$defs": {
+    "baseEvent": {
+      "type": "object",
+      "required": ["event_id", "type", "session_id", "timestamp"],
+      "properties": {
+        "event_id": { "type": "string" },
+        "type": { "type": "string" },
+        "session_id": { "type": "string" },
+        "turn_id": { "type": ["string", "null"] },
+        "timestamp": { "type": "string", "format": "date-time" }
+      }
+    },
+    "audioChunk": {
+      "type": "object",
+      "required": ["encoding", "sample_rate_hz", "channels", "sequence"],
+      "properties": {
+        "encoding": { "type": "string" },
+        "sample_rate_hz": { "type": "integer", "minimum": 1 },
+        "channels": { "type": "integer", "minimum": 1 },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "duration_ms": { "type": ["number", "null"] }
+      }
+    },
+    "sessionCreatedEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "session.created" },
+            "status": { "const": "created" }
+          },
+          "required": ["status"]
+        }
+      ]
+    },
+    "sessionReadyEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "session.ready" },
+            "status": { "const": "ready" }
+          },
+          "required": ["status"]
+        }
+      ]
+    },
+    "sttPartialEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "stt.partial" },
+            "text": { "type": "string" },
+            "confidence": { "type": ["number", "null"] }
+          },
+          "required": ["text"]
+        }
+      ]
+    },
+    "sttFinalEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "stt.final" },
+            "text": { "type": "string" },
+            "confidence": { "type": ["number", "null"] }
+          },
+          "required": ["text"]
+        }
+      ]
+    },
+    "routeSelectedEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "route.selected" },
+            "router_id": { "type": "string" },
+            "llm_engine_id": { "type": ["string", "null"] },
+            "provider": { "type": ["string", "null"] },
+            "model": { "type": ["string", "null"] },
+            "reason": { "type": ["string", "null"] },
+            "confidence": { "type": ["number", "null"] }
+          },
+          "required": ["router_id"]
+        }
+      ]
+    },
+    "llmTokenEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "llm.token" },
+            "token": { "type": "string" },
+            "index": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["token", "index"]
+        }
+      ]
+    },
+    "llmCompletedEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "llm.completed" },
+            "text": { "type": "string" },
+            "finish_reason": { "type": ["string", "null"] }
+          },
+          "required": ["text"]
+        }
+      ]
+    },
+    "ttsChunkEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "tts.chunk" },
+            "chunk": { "$ref": "#/$defs/audioChunk" },
+            "text_segment": { "type": ["string", "null"] }
+          },
+          "required": ["chunk"]
+        }
+      ]
+    },
+    "ttsCompletedEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "tts.completed" },
+            "duration_ms": { "type": ["number", "null"] }
+          }
+        }
+      ]
+    },
+    "conversationInterruptedEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "conversation.interrupted" },
+            "reason": { "type": ["string", "null"] }
+          }
+        }
+      ]
+    },
+    "errorEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "error" },
+            "code": { "type": "string" },
+            "message": { "type": "string" },
+            "retryable": { "type": "boolean" },
+            "details": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "required": ["code", "message", "retryable"]
+        }
+      ]
+    },
+    "sessionClosedEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "session.closed" },
+            "status": { "const": "closed" }
+          },
+          "required": ["status"]
+        }
+      ]
+    }
+  }
+}

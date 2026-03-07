@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-voice.dev/contracts/events/realtime-client-message.schema.json",
+  "title": "Open Voice Realtime Client Messages",
+  "description": "Client-to-runtime realtime message vocabulary for the Open Voice runtime.",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/sessionStartMessage" },
+    { "$ref": "#/$defs/audioAppendMessage" },
+    { "$ref": "#/$defs/audioCommitMessage" },
+    { "$ref": "#/$defs/conversationInterruptMessage" },
+    { "$ref": "#/$defs/engineSelectMessage" },
+    { "$ref": "#/$defs/configUpdateMessage" },
+    { "$ref": "#/$defs/sessionCloseMessage" }
+  ],
+  "$defs": {
+    "baseMessage": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string" },
+        "session_id": { "type": ["string", "null"] }
+      }
+    },
+    "engineSelection": {
+      "type": "object",
+      "properties": {
+        "stt": { "type": "string" },
+        "router": { "type": "string" },
+        "llm": { "type": "string" },
+        "tts": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "audioChunk": {
+      "type": "object",
+      "required": ["chunk_id", "sequence", "encoding", "sample_rate_hz", "channels"],
+      "properties": {
+        "chunk_id": { "type": "string" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "encoding": { "type": "string", "enum": ["pcm_s16le", "pcm_f32le"] },
+        "sample_rate_hz": { "type": "integer", "minimum": 1 },
+        "channels": { "type": "integer", "minimum": 1 },
+        "duration_ms": { "type": ["number", "null"] },
+        "transport": {
+          "type": "string",
+          "enum": ["inline-base64", "binary-frame"]
+        },
+        "data_base64": { "type": ["string", "null"] }
+      }
+    },
+    "sessionStartMessage": {
+      "allOf": [
+        { "$ref": "#/$defs/baseMessage" },
+        {
+          "properties": {
+            "type": { "const": "session.start" },
+            "engine_selection": { "$ref": "#/$defs/engineSelection" },
+            "metadata": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      ]
+    },
+    "audioAppendMessage": {
+      "allOf": [
+        { "$ref": "#/$defs/baseMessage" },
+        {
+          "properties": {
+            "type": { "const": "audio.append" },
+            "chunk": { "$ref": "#/$defs/audioChunk" }
+          },
+          "required": ["session_id", "chunk"]
+        }
+      ]
+    },
+    "audioCommitMessage": {
+      "allOf": [
+        { "$ref": "#/$defs/baseMessage" },
+        {
+          "properties": {
+            "type": { "const": "audio.commit" },
+            "sequence": { "type": ["integer", "null"], "minimum": 0 }
+          },
+          "required": ["session_id"]
+        }
+      ]
+    },
+    "conversationInterruptMessage": {
+      "allOf": [
+        { "$ref": "#/$defs/baseMessage" },
+        {
+          "properties": {
+            "type": { "const": "conversation.interrupt" },
+            "reason": { "type": ["string", "null"] }
+          },
+          "required": ["session_id"]
+        }
+      ]
+    },
+    "engineSelectMessage": {
+      "allOf": [
+        { "$ref": "#/$defs/baseMessage" },
+        {
+          "properties": {
+            "type": { "const": "engine.select" },
+            "engine_selection": { "$ref": "#/$defs/engineSelection" }
+          },
+          "required": ["session_id", "engine_selection"]
+        }
+      ]
+    },
+    "configUpdateMessage": {
+      "allOf": [
+        { "$ref": "#/$defs/baseMessage" },
+        {
+          "properties": {
+            "type": { "const": "config.update" },
+            "config": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "required": ["session_id", "config"]
+        }
+      ]
+    },
+    "sessionCloseMessage": {
+      "allOf": [
+        { "$ref": "#/$defs/baseMessage" },
+        {
+          "properties": {
+            "type": { "const": "session.close" }
+          },
+          "required": ["session_id"]
+        }
+      ]
+    }
+  }
+}

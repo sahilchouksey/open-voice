@@ -1,0 +1,228 @@
+openapi: 3.1.0
+info:
+  title: Open Voice Runtime API
+  version: 0.1.0
+  summary: SDK-facing runtime contract for realtime voice orchestration.
+  description: |
+    Open Voice is a realtime voice runtime centered on STT -> Router -> LLM -> TTS.
+    The runtime owns voice-session concerns such as audio flow, turn state,
+    interruption, and barge-in. Concrete providers stay behind domain contracts.
+servers:
+  - url: http://localhost:8000
+tags:
+  - name: Health
+  - name: Engines
+  - name: Sessions
+paths:
+  /health:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      summary: Get runtime health
+      responses:
+        "200":
+          description: Runtime health status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /v1/engines:
+    get:
+      tags: [Engines]
+      operationId: listEngines
+      summary: List available runtime engines
+      responses:
+        "200":
+          description: Engines grouped by capability domain.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EngineCatalogResponse"
+  /v1/sessions:
+    post:
+      tags: [Sessions]
+      operationId: createSession
+      summary: Create a new voice session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionCreateRequest"
+      responses:
+        "201":
+          description: Voice session created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionState"
+  /v1/sessions/{session_id}:
+    get:
+      tags: [Sessions]
+      operationId: getSession
+      summary: Get a session snapshot
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          description: Session snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionState"
+        "404":
+          description: Session not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      tags: [Sessions]
+      operationId: closeSession
+      summary: Close an existing session
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "204":
+          description: Session closed.
+        "404":
+          description: Session not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /v1/realtime/conversation:
+    get:
+      tags: [Sessions]
+      operationId: connectRealtimeConversation
+      summary: Connect to the realtime conversation stream
+      description: |
+        This endpoint is modeled as a WebSocket transport. Clients stream audio and
+        control messages to the runtime and receive structured conversation events.
+      x-openvoice-transport: websocket
+      parameters:
+        - name: session_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Existing session id to attach to, if any.
+      responses:
+        "101":
+          description: WebSocket upgrade accepted.
+components:
+  parameters:
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+    EngineDescriptor:
+      type: object
+      required: [id, kind, label]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [stt, router, llm, tts]
+        label:
+          type: string
+        default:
+          type: boolean
+        capabilities:
+          type: object
+          additionalProperties: true
+    EngineCatalogResponse:
+      type: object
+      required: [stt, router, llm, tts]
+      properties:
+        stt:
+          type: array
+          items:
+            $ref: "#/components/schemas/EngineDescriptor"
+        router:
+          type: array
+          items:
+            $ref: "#/components/schemas/EngineDescriptor"
+        llm:
+          type: array
+          items:
+            $ref: "#/components/schemas/EngineDescriptor"
+        tts:
+          type: array
+          items:
+            $ref: "#/components/schemas/EngineDescriptor"
+    EngineSelection:
+      type: object
+      properties:
+        stt:
+          type: string
+        router:
+          type: string
+        llm:
+          type: string
+        tts:
+          type: string
+    SessionCreateRequest:
+      type: object
+      properties:
+        engine_selection:
+          $ref: "#/components/schemas/EngineSelection"
+        metadata:
+          type: object
+          additionalProperties: true
+    SessionState:
+      type: object
+      required: [session_id, status, created_at, updated_at, engine_selection]
+      properties:
+        session_id:
+          type: string
+        status:
+          type: string
+          enum:
+            - created
+            - loading
+            - ready
+            - listening
+            - thinking
+            - speaking
+            - interrupted
+            - closed
+            - failed
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        active_turn_id:
+          type: string
+          nullable: true
+        engine_selection:
+          $ref: "#/components/schemas/EngineSelection"
+        metadata:
+          type: object
+          additionalProperties: true
+    ErrorResponse:
+      type: object
+      required: [code, message, retryable]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        retryable:
+          type: boolean
+        details:
+          type: object
+          additionalProperties: true

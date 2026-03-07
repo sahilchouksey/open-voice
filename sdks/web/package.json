@@ -1,0 +1,10 @@
+{
+  "name": "@open-voice/web-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Web client SDK for the Open Voice realtime runtime.",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}
