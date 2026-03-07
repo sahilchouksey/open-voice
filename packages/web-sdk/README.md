@@ -4,7 +4,7 @@ This package is the primary client-side SDK surface for `open-voice`.
 
 It is distinct from:
 
-- `apps/runtime/`, which owns server-side voice session orchestration
+- `packages/runtime/`, which owns server-side voice session orchestration
 - the future web demo app, which will consume this SDK
 
 The web SDK owns:

@@ -21,4 +21,4 @@ The primary control flow is:
 interruption, and orchestration.
 
 This runtime is intended to pair with client SDK surfaces, starting with the
-web client SDK in `sdks/web`.
+web client SDK in `packages/web-sdk`.

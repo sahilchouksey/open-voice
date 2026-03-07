@@ -7,8 +7,8 @@ mixed into the reusable product surfaces.
 
 Current separation:
 
-- `apps/runtime` = backend runtime SDK
-- `sdks/web` = reusable web client SDK
+- `packages/runtime` = backend runtime SDK
+- `packages/web-sdk` = reusable web client SDK
 - `demos/web` = demo application that will consume the SDK later
 
 We are not implementing the demo yet.
