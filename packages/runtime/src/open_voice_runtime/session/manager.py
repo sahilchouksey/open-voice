@@ -25,6 +25,9 @@ class SessionManager(ABC):
     async def update(self, session_id: str, event: SessionTransition) -> SessionState:
         raise NotImplementedError
 
+    async def persist(self, state: SessionState) -> None:
+        """Persist current session state (optional, no-op for in-memory managers)."""
+
     @abstractmethod
     async def close(self, session_id: str) -> None:
         raise NotImplementedError

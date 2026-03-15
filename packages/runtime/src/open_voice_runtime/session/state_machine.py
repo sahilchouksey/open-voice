@@ -36,6 +36,7 @@ ALLOWED_SESSION_TRANSITIONS: Mapping[SessionStatus, frozenset[SessionStatus]] = 
     ),
     SessionStatus.THINKING: frozenset(
         {
+            SessionStatus.LISTENING,
             SessionStatus.SPEAKING,
             SessionStatus.INTERRUPTED,
             SessionStatus.CLOSED,

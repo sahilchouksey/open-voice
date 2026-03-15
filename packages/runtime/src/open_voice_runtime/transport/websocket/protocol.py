@@ -11,6 +11,9 @@ class ClientMessageType(str, Enum):
     SESSION_START = "session.start"
     AUDIO_APPEND = "audio.append"
     AUDIO_COMMIT = "audio.commit"
+    USER_TURN_COMMIT = "user_turn.commit"
+    AGENT_SAY = "agent.say"
+    AGENT_GENERATE_REPLY = "agent.generate_reply"
     CONVERSATION_INTERRUPT = "conversation.interrupt"
     ENGINE_SELECT = "engine.select"
     CONFIG_UPDATE = "config.update"
@@ -40,6 +43,7 @@ class SessionStartMessage:
     session_id: str | None = None
     engine_selection: EngineSelection = field(default_factory=EngineSelection)
     metadata: dict[str, Any] = field(default_factory=dict)
+    config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -54,6 +58,29 @@ class AudioCommitMessage:
     session_id: str
     sequence: int | None = None
     type: ClientMessageType = ClientMessageType.AUDIO_COMMIT
+
+
+@dataclass(slots=True)
+class UserTurnCommitMessage:
+    session_id: str
+    sequence: int | None = None
+    type: ClientMessageType = ClientMessageType.USER_TURN_COMMIT
+
+
+@dataclass(slots=True)
+class AgentSayMessage:
+    session_id: str
+    text: str
+    type: ClientMessageType = ClientMessageType.AGENT_SAY
+
+
+@dataclass(slots=True)
+class AgentGenerateReplyMessage:
+    session_id: str
+    user_text: str
+    instructions: str | None = None
+    allow_interruptions: bool | None = None
+    type: ClientMessageType = ClientMessageType.AGENT_GENERATE_REPLY
 
 
 @dataclass(slots=True)
@@ -87,6 +114,9 @@ ClientMessage: TypeAlias = (
     SessionStartMessage
     | AudioAppendMessage
     | AudioCommitMessage
+    | UserTurnCommitMessage
+    | AgentSayMessage
+    | AgentGenerateReplyMessage
     | ConversationInterruptMessage
     | EngineSelectMessage
     | ConfigUpdateMessage
