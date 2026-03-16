@@ -43,6 +43,7 @@ class RouteRequest:
 @dataclass(slots=True)
 class RouteDecision:
     router_id: str
+    route_name: str
     llm_engine_id: str | None = None
     provider: str | None = None
     model: str | None = None

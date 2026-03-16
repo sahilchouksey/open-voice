@@ -9,6 +9,11 @@ class SttService:
     def __init__(self, registry: SttEngineRegistry) -> None:
         self._registry = registry
 
+    def is_available(self, engine_id: str | None = None) -> bool:
+        if engine_id is None:
+            return self._registry.has_default()
+        return self._registry.has(engine_id)
+
     async def create_stream(
         self, config: SttConfig, *, engine_id: str | None = None
     ) -> BaseSttStream:

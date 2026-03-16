@@ -30,6 +30,10 @@ class BaseSttStream(ABC):
     def events(self) -> AsyncIterator[SttEvent]:
         raise NotImplementedError
 
+    @abstractmethod
+    async def drain(self, wait_seconds: float = 0.0) -> list[SttEvent]:
+        raise NotImplementedError
+
 
 class BaseSttEngine(ABC):
     kind = "stt"

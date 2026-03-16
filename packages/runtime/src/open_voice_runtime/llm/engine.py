@@ -25,5 +25,5 @@ class BaseLlmEngine(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def stream(self, request: LlmRequest) -> AsyncIterator[LlmEvent]:
+    def stream(self, request: LlmRequest) -> AsyncIterator[LlmEvent]:
         raise NotImplementedError

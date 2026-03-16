@@ -23,6 +23,8 @@ class EngineDescriptor:
     label: str
     default: bool
     capabilities: Any
+    available: bool = True
+    status: str = "ready"
 
 
 class EngineRegistry(Generic[T]):
@@ -44,6 +46,12 @@ class EngineRegistry(Generic[T]):
                 details={"engine_id": engine_id, "known_ids": sorted(self._engines)},
             ) from exc
 
+    def has(self, engine_id: str) -> bool:
+        return engine_id in self._engines
+
+    def has_default(self) -> bool:
+        return self._default_engine_id is not None and self._default_engine_id in self._engines
+
     def resolve(self, engine_id: str | None) -> T:
         if engine_id is None:
             return self.get_default()
@@ -62,6 +70,8 @@ class EngineRegistry(Generic[T]):
                 label=engine.label,
                 default=engine.id == self._default_engine_id,
                 capabilities=engine.capabilities,
+                available=getattr(engine, "available", True),
+                status=getattr(engine, "status", "ready"),
             )
             for engine in self._engines.values()
         ]
