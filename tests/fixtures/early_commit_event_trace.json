@@ -1,0 +1,65 @@
+{
+  "description": "Event trace showing system committing turn BEFORE VAD end_of_speech",
+  "issue": "STT final arrives while user is still speaking, LLM starts processing before user finishes",
+  "root_cause": "Turn auto-commit triggers on stt.final without waiting for VAD end_of_speech",
+  "expected_behavior": "System should buffer STT final events and only commit after VAD end_of_speech",
+  "event_sequence": [
+    {
+      "timestamp": "2026-03-24T16:55:25.110665+00:00",
+      "event": "turn.metrics",
+      "description": "Previous turn completes - Thanks for the patience in teaching me!"
+    },
+    {
+      "timestamp": "2026-03-24T16:55:32.621789+00:00",
+      "event": "vad.start_of_speech",
+      "description": "User starts speaking again"
+    },
+    {
+      "timestamp": "2026-03-24T16:55:32.928155+00:00",
+      "event": "stt.partial",
+      "description": "STT partial: 'Yeah.'"
+    },
+    {
+      "timestamp": "2026-03-24T16:55:34.403515+00:00",
+      "event": "stt.final",
+      "description": "STT final: 'okay now search' - STILL SPEAKING!"
+    },
+    {
+      "timestamp": "2026-03-24T16:55:35.013553+00:00",
+      "event": "stt.final",
+      "description": "STT final: 'About me' - STILL SPEAKING!"
+    },
+    {
+      "timestamp": "2026-03-24T16:55:36.292910+00:00",
+      "event": "stt.final",
+      "description": "STT final with generation_id: 'okay now search About me' - Turn committed!"
+    },
+    {
+      "timestamp": "2026-03-24T16:55:37.904388+00:00",
+      "event": "route.selected",
+      "description": "Route selected - LLM processing started"
+    },
+    {
+      "timestamp": "2026-03-24T16:55:37.904421+00:00",
+      "event": "session.status",
+      "description": "Session status: thinking - LLM is thinking"
+    },
+    {
+      "timestamp": "2026-03-24T16:55:38.368061+00:00",
+      "event": "llm.phase",
+      "description": "LLM phase: thinking - LLM started processing BEFORE user finished speaking!"
+    }
+  ],
+  "timing_analysis": {
+    "vad_start_of_speech": "16:55:32.621",
+    "stt_final_while_speaking": "16:55:34.403",
+    "stt_final_with_generation_id": "16:55:36.292",
+    "llm_thinking": "16:55:38.368",
+    "vad_end_of_speech": "NEVER DETECTED - user was still speaking when turn was committed"
+  },
+  "root_cause_analysis": {
+    "problem": "The system committed the turn at 16:55:36 (stt.final with generation_id) but VAD had not detected end_of_speech yet",
+    "consequence": "LLM started processing 'okay now search About me' at 16:55:38 while user was still speaking",
+    "result": "User said 'never mind' but it became a NEW turn instead of interrupting the current turn"
+  }
+}

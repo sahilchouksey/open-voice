@@ -1,0 +1,34 @@
+{
+  "description": "Event trace showing LLM continues processing after user says 'never mind'",
+  "issue": "User says 'never mind' but LLM continues processing old query and responds to it",
+  "symptom": "LLM processes 'okay now search About me' instead of stopping for 'never mind'",
+  "root_cause": "Turn committed before VAD end_of_speech, so 'never mind' became separate turn",
+  "event_sequence": [
+    {
+      "timestamp": "2026-03-24T16:55:36.292910+00:00",
+      "event": "stt.final",
+      "description": "Turn committed: 'okay now search About me' - User still speaking!"
+    },
+    {
+      "timestamp": "2026-03-24T16:55:37.904388+00:00",
+      "event": "route.selected",
+      "description": "Route selected for processing"
+    },
+    {
+      "timestamp": "2026-03-24T16:55:38.368061+00:00",
+      "event": "llm.phase",
+      "description": "LLM starts thinking - processing 'okay now search About me'"
+    },
+    {
+      "timestamp": "2026-03-24T16:55:47+00:00",
+      "event": "conversation.interrupted",
+      "description": "User said 'never mind' - but this is a NEW turn, not an interrupt!"
+    }
+  ],
+  "analysis": {
+    "problem_1": "Turn committed at 16:55:36 before VAD end_of_speech",
+    "problem_2": "LLM started processing at 16:55:38 while user still speaking",
+    "problem_3": "'Never mind' arrived at 16:55:47 as separate turn - too late to interrupt",
+    "consequence": "LLM responded to 'okay now search About me' instead of stopping"
+  }
+}

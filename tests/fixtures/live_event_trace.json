@@ -1,0 +1,140 @@
+[
+  {
+    "type": "session.status",
+    "session_id": "sess_d4dc7b4bf682443ebb6a9843e7ed803c",
+    "turn_id": "turn_0f877c45863a4f0bacbdbf6f7e57c74c",
+    "generation_id": "gen_5493ef04737c4a63ba46216a13783dbd",
+    "event_id": "evt_3819a37e64f843edaad53e01f49a3644",
+    "timestamp": "2026-03-24T14:21:25.678738+00:00",
+    "status": "listening",
+    "reason": "response.complete"
+  },
+  {
+    "type": "turn.metrics",
+    "session_id": "sess_d4dc7b4bf682443ebb6a9843e7ed803c",
+    "turn_id": "turn_0f877c45863a4f0bacbdbf6f7e57c74c",
+    "generation_id": "gen_5493ef04737c4a63ba46216a13783dbd",
+    "event_id": "evt_bd78077e7bb2414491c1cc75764b2138",
+    "timestamp": "2026-03-24T14:21:25.678852+00:00",
+    "queue_delay_ms": null,
+    "stt_to_route_ms": null,
+    "route_to_llm_first_delta_ms": null,
+    "llm_first_delta_to_tts_first_chunk_ms": 2227.7616089995718,
+    "stt_to_tts_first_chunk_ms": null,
+    "turn_to_first_llm_delta_ms": 3828.250726997794,
+    "turn_to_complete_ms": 7976.5136939968215,
+    "cancelled": false,
+    "reason": "completed"
+  },
+  {
+    "type": "stt.final",
+    "session_id": "sess_d4dc7b4bf682443ebb6a9843e7ed803c",
+    "turn_id": "turn_bf83e6c75bda4d8993d9f0c256b2a3dd",
+    "generation_id": null,
+    "event_id": "evt_0b940d9ac580463b913d0df625dcf431",
+    "timestamp": "2026-03-24T14:21:26.341806+00:00",
+    "text": "Now I want to interrupt you.",
+    "confidence": null
+  },
+  {
+    "type": "vad.state",
+    "session_id": "sess_d4dc7b4bf682443ebb6a9843e7ed803c",
+    "turn_id": "turn_bf83e6c75bda4d8993d9f0c256b2a3dd",
+    "generation_id": null,
+    "event_id": "evt_5de6f05323b446439ae5a95ac5255c62",
+    "timestamp": "2026-03-24T14:21:27.339110+00:00",
+    "kind": "end_of_speech",
+    "sequence": 3,
+    "speaking": false,
+    "probability": null,
+    "timestamp_ms": 9278,
+    "speech_duration_ms": null,
+    "silence_duration_ms": null
+  },
+  {
+    "type": "route.selected",
+    "session_id": "sess_d4dc7b4bf682443ebb6a9843e7ed803c",
+    "turn_id": "turn_bf83e6c75bda4d8993d9f0c256b2a3dd",
+    "generation_id": "gen_61ae75b2bb654e579e3c4fba20ce5a55",
+    "event_id": "evt_2031aae3292745bbb3f7d143268f8e84",
+    "timestamp": "2026-03-24T14:21:29.327694+00:00",
+    "router_id": "fallback-router",
+    "route_name": "moderate_route",
+    "llm_engine_id": "opencode",
+    "provider": "opencode",
+    "model": "minimax-m2.5-free",
+    "profile_id": "moderate_route",
+    "reason": "Router timed out after 1500 ms; using configured fallback route target.",
+    "confidence": 0
+  },
+  {
+    "type": "session.status",
+    "session_id": "sess_d4dc7b4bf682443ebb6a9843e7ed803c",
+    "turn_id": "turn_bf83e6c75bda4d8993d9f0c256b2a3dd",
+    "generation_id": "gen_61ae75b2bb654e579e3c4fba20ce5a55",
+    "event_id": "evt_81acc20b38bd44498f5cde3913a8f75a",
+    "timestamp": "2026-03-24T14:21:29.327718+00:00",
+    "status": "thinking",
+    "reason": "llm.generating"
+  },
+  {
+    "type": "llm.phase",
+    "session_id": "sess_d4dc7b4bf682443ebb6a9843e7ed803c",
+    "turn_id": "turn_bf83e6c75bda4d8993d9f0c256b2a3dd",
+    "generation_id": "gen_61ae75b2bb654e579e3c4fba20ce5a55",
+    "event_id": "evt_ff837cde28124afabdd6f8fba0894372",
+    "timestamp": "2026-03-24T14:21:29.565669+00:00",
+    "phase": "thinking"
+  },
+  {
+    "type": "llm.phase",
+    "session_id": "sess_d4dc7b4bf682443ebb6a9843e7ed803c",
+    "turn_id": "turn_bf83e6c75bda4d8993d9f0c256b2a3dd",
+    "generation_id": "gen_61ae75b2bb654e579e3c4fba20ce5a55",
+    "event_id": "evt_ec09522f97d04e43a0be44ff6470c871",
+    "timestamp": "2026-03-24T14:21:32.871366+00:00",
+    "phase": "generating"
+  },
+  {
+    "type": "llm.response.delta",
+    "session_id": "sess_d4dc7b4bf682443ebb6a9843e7ed803c",
+    "turn_id": "turn_bf83e6c75bda4d8993d9f0c256b2a3dd",
+    "generation_id": "gen_61ae75b2bb654e579e3c4fba20ce5a55",
+    "event_id": "evt_da0136c615a84aa28ba46b35a26cc5af",
+    "timestamp": "2026-03-24T14:21:32.871584+00:00",
+    "part_id": "prt_d2038e5450015dmDuz0f8krdSK",
+    "delta": "Got it, I'm listening. What's up?",
+    "lane": "speech"
+  },
+  {
+    "type": "session.status",
+    "session_id": "sess_d4dc7b4bf682443ebb6a9843e7ed803c",
+    "turn_id": "turn_bf83e6c75bda4d8993d9f0c256b2a3dd",
+    "generation_id": null,
+    "event_id": "evt_7567da9ecaeb4221b8784ff7e32b6031",
+    "timestamp": "2026-03-24T14:21:32.871825+00:00",
+    "status": "speaking",
+    "reason": "tts.generating"
+  },
+  {
+    "type": "llm.completed",
+    "session_id": "sess_d4dc7b4bf682443ebb6a9843e7ed803c",
+    "turn_id": "turn_bf83e6c75bda4d8993d9f0c256b2a3dd",
+    "generation_id": "gen_61ae75b2bb654e579e3c4fba20ce5a55",
+    "event_id": "evt_7ff6ecf7f49f420aae294b80ae7e0f50",
+    "timestamp": "2026-03-24T14:21:32.928382+00:00",
+    "text": "Got it, I'm listening. What's up?",
+    "finish_reason": "stop",
+    "provider": "opencode",
+    "model": "minimax-m2.5-free"
+  },
+  {
+    "type": "tts.completed",
+    "session_id": "sess_d4dc7b4bf682443ebb6a9843e7ed803c",
+    "turn_id": "turn_bf83e6c75bda4d8993d9f0c256b2a3dd",
+    "generation_id": "gen_61ae75b2bb654e579e3c4fba20ce5a55",
+    "event_id": "evt_8d2dbadc91674dcda4546a2252203b4b",
+    "timestamp": "2026-03-24T14:21:33.520689+00:00",
+    "duration_ms": 2133.3333333333335
+  }
+]
