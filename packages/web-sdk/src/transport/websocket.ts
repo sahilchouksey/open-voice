@@ -3,6 +3,8 @@ import type { ClientMessage, ConversationEvent } from "../protocol"
 export interface RealtimeSocketOptions {
   baseUrl: string
   webSocket?: typeof WebSocket
+  onInboundEvent?: (event: ConversationEvent) => void
+  onOutboundMessage?: (message: ClientMessage) => void
 }
 
 export interface ConnectOptions {
@@ -16,10 +18,14 @@ export class RealtimeConversationSocket {
   readonly socketCtor: typeof WebSocket
   socket?: WebSocket
   listeners = new Set<ConversationListener>()
+  readonly onInboundEvent?: (event: ConversationEvent) => void
+  readonly onOutboundMessage?: (message: ClientMessage) => void
 
   constructor(opts: RealtimeSocketOptions) {
     this.baseUrl = opts.baseUrl
     this.socketCtor = opts.webSocket ?? WebSocket
+    this.onInboundEvent = opts.onInboundEvent
+    this.onOutboundMessage = opts.onOutboundMessage
   }
 
   connect(opts: ConnectOptions = {}): Promise<void> {
@@ -38,6 +44,7 @@ export class RealtimeConversationSocket {
       socket.addEventListener("message", (event) => {
         if (typeof event.data !== "string") return
         const payload = JSON.parse(event.data) as ConversationEvent
+        this.onInboundEvent?.(payload)
         for (const listener of this.listeners) listener(payload)
       })
       socket.addEventListener("error", () => reject(new Error("Realtime socket failed")), {
@@ -58,6 +65,7 @@ export class RealtimeConversationSocket {
     if (!this.socket || this.socket.readyState !== this.socketCtor.OPEN) {
       throw new Error("Realtime socket is not connected")
     }
+    this.onOutboundMessage?.(message)
     this.socket.send(JSON.stringify(message))
   }
 

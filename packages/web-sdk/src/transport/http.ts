@@ -1,4 +1,4 @@
-import type { EngineCatalogResponse, SessionState } from "../protocol"
+import type { RuntimeConfigPayload, EngineCatalogResponse, SessionState } from "../protocol"
 
 export interface RuntimeHttpClientOptions {
   baseUrl: string
@@ -13,6 +13,7 @@ export interface SessionCreateRequest {
     tts?: string
   }
   metadata?: Record<string, unknown>
+  runtime_config?: RuntimeConfigPayload
 }
 
 export class RuntimeHttpClient {
@@ -21,7 +22,8 @@ export class RuntimeHttpClient {
 
   constructor(opts: RuntimeHttpClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/$/, "")
-    this.fetcher = opts.fetch ?? fetch
+    const rawFetch = opts.fetch ?? globalThis.fetch
+    this.fetcher = rawFetch.bind(globalThis)
   }
 
   async health(): Promise<{ status: string }> {
