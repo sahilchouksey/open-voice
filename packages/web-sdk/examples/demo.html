@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Open Voice Live Demo</title>
+    <link rel="stylesheet" href="./demo.css" />
+  </head>
+  <body>
+    <main class="shell" aria-label="Open Voice realtime demo">
+      <header class="window hero">
+        <div class="hero-mark" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </div>
+        <div class="hero-copy">
+          <h1>OpenVoice</h1>
+        </div>
+        <dl class="hero-status" aria-live="polite">
+          <div>
+            <dt class="meta-label">Session</dt>
+            <dd id="sessionStatus">disconnected</dd>
+          </div>
+          <div>
+            <dt class="meta-label">Session ID</dt>
+            <dd id="sessionId">-</dd>
+          </div>
+        </dl>
+      </header>
+
+      <section class="window toolbar" aria-label="Connection controls">
+        <label for="baseUrl">
+          Runtime URL
+          <input id="baseUrl" value="" autocomplete="url" placeholder="http://<tailscale-ip>:8011" />
+        </label>
+        <label for="voiceId">
+          Voice
+          <input id="voiceId" value="af_heart" autocomplete="off" />
+        </label>
+        <label for="turnQueuePolicy">
+          Turn Queue
+          <select id="turnQueuePolicy">
+            <option value="enqueue" selected>enqueue</option>
+            <option value="send_now">send_now</option>
+            <option value="inject_next_loop">inject_next_loop</option>
+          </select>
+        </label>
+        <details>
+          <summary>Advanced Settings</summary>
+          <div class="advanced-settings">
+            <label for="interruptMode">
+              Interrupt Mode
+              <select id="interruptMode">
+                <option value="immediate" selected>immediate</option>
+                <option value="adaptive">adaptive</option>
+                <option value="disabled">disabled</option>
+              </select>
+            </label>
+            <label for="interruptCooldown">
+              Interrupt Cooldown (ms)
+              <input id="interruptCooldown" type="number" value="300" min="0" max="2000" step="100" />
+            </label>
+            <label for="endpointingMode">
+              EndPointing Mode
+              <select id="endpointingMode">
+                <option value="fixed" selected>fixed</option>
+                <option value="dynamic">dynamic</option>
+              </select>
+            </label>
+            <label for="endpointingMinDelay">
+              Min Delay (s)
+              <input id="endpointingMinDelay" type="number" value="0.5" min="0.1" max="2.0" step="0.1" />
+            </label>
+            <label for="endpointingMaxDelay">
+              Max Delay (s)
+              <input id="endpointingMaxDelay" type="number" value="3.0" min="1.0" max="5.0" step="0.5" />
+            </label>
+          </div>
+        </details>
+        <div class="actions" role="group" aria-label="Session actions">
+          <button id="connectBtn" type="button">Connect</button>
+          <button id="disconnectBtn" type="button" disabled>Disconnect</button>
+          <button id="listenBtn" type="button" disabled>Start Listening</button>
+          <button id="stopBtn" type="button" disabled>Stop Listening</button>
+          <button id="interruptBtn" type="button" disabled>Interrupt</button>
+        </div>
+      </section>
+
+      <section class="pipeline-grid">
+        <article class="window stage mic-stage" aria-label="Microphone input">
+          <div class="stage-head">
+            <div>
+              <p class="stage-label">Input</p>
+              <h2>Microphone</h2>
+            </div>
+            <div class="badge-row">
+              <span id="micState" class="badge idle">waiting</span>
+              <span id="turnState" class="badge idle">idle</span>
+            </div>
+          </div>
+          <div class="mic-meter">
+            <div class="meter-track" aria-hidden="true"><div id="micMeter" class="meter-fill"></div></div>
+            <p id="micMeta">Press Start Listening to stream microphone audio.</p>
+          </div>
+        </article>
+
+        <article class="window stage stt-stage" aria-label="Speech to text output">
+          <div class="stage-head">
+            <div>
+              <p class="stage-label">Stage 1</p>
+              <h2>STT</h2>
+            </div>
+            <span id="sttState" class="badge idle">waiting</span>
+          </div>
+          <div id="sttText" class="stream-card muted" aria-live="polite">Waiting for speech...</div>
+        </article>
+
+        <article class="window stage router-stage" aria-label="Route selection">
+          <div class="stage-head">
+            <div>
+              <p class="stage-label">Stage 2</p>
+              <h2>Router</h2>
+            </div>
+            <span id="routerState" class="badge idle">waiting</span>
+          </div>
+          <div id="routerText" class="stream-card muted">No route selected yet.</div>
+          <div id="queueText" class="stream-card muted">Queue: 0 pending turns.</div>
+        </article>
+
+        <article class="window stage llm-stage" aria-label="Language model output">
+          <div class="stage-head">
+            <div>
+              <p class="stage-label">Stage 3</p>
+              <h2>LLM</h2>
+            </div>
+            <span id="llmState" class="badge idle">waiting</span>
+          </div>
+          <div class="llm-grid">
+            <section>
+              <p class="subhead">Thinking</p>
+              <div id="thinkingText" class="stream-card muted">No reasoning yet.</div>
+            </section>
+            <section>
+              <p class="subhead">Response</p>
+              <div id="responseText" class="stream-card">-</div>
+            </section>
+          </div>
+        </article>
+
+        <article class="window stage tts-stage" aria-label="Text to speech output">
+          <div class="stage-head">
+            <div>
+              <p class="stage-label">Stage 4</p>
+              <h2>TTS</h2>
+            </div>
+            <span id="ttsState" class="badge idle">waiting</span>
+          </div>
+          <p id="ttsMeta" class="subcopy">Audio will start playing as soon as chunks arrive.</p>
+          <audio id="audioPlayer" controls></audio>
+          <div id="metricsText" class="stream-card muted">Turn metrics will appear here.</div>
+        </article>
+
+        <article class="window stage transcript-stage" aria-label="Conversation transcript">
+          <div class="stage-head">
+            <div>
+              <p class="stage-label">Conversation</p>
+              <h2>Transcript</h2>
+            </div>
+          </div>
+          <div id="transcript" class="transcript" aria-live="polite"></div>
+        </article>
+      </section>
+
+      <section class="window diagnostics" aria-label="Realtime diagnostics">
+        <div class="stage-head">
+          <div>
+            <p class="stage-label">Diagnostics</p>
+            <h2>Live Event Trace</h2>
+          </div>
+        </div>
+        <pre id="events"></pre>
+      </section>
+    </main>
+    <script type="module" src="./demo.js"></script>
+  </body>
+</html>

@@ -1,0 +1,9 @@
+{
+  "name": "@open-voice/demos",
+  "private": true,
+  "scripts": {
+    "dev": "./dev.sh",
+    "frontend": "bun --cwd ./frontend run dev",
+    "backend": "python3 ./backend/run.py"
+  }
+}
