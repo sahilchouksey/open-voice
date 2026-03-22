@@ -7,14 +7,23 @@
   "oneOf": [
     { "$ref": "#/$defs/sessionCreatedEvent" },
     { "$ref": "#/$defs/sessionReadyEvent" },
+    { "$ref": "#/$defs/sessionStatusEvent" },
+    { "$ref": "#/$defs/vadStateEvent" },
     { "$ref": "#/$defs/sttPartialEvent" },
     { "$ref": "#/$defs/sttFinalEvent" },
     { "$ref": "#/$defs/routeSelectedEvent" },
-    { "$ref": "#/$defs/llmTokenEvent" },
+    { "$ref": "#/$defs/llmPhaseEvent" },
+    { "$ref": "#/$defs/llmReasoningDeltaEvent" },
+    { "$ref": "#/$defs/llmResponseDeltaEvent" },
+    { "$ref": "#/$defs/llmToolUpdateEvent" },
+    { "$ref": "#/$defs/llmUsageEvent" },
+    { "$ref": "#/$defs/llmSummaryEvent" },
     { "$ref": "#/$defs/llmCompletedEvent" },
     { "$ref": "#/$defs/ttsChunkEvent" },
     { "$ref": "#/$defs/ttsCompletedEvent" },
     { "$ref": "#/$defs/conversationInterruptedEvent" },
+    { "$ref": "#/$defs/turnQueuedEvent" },
+    { "$ref": "#/$defs/turnMetricsEvent" },
     { "$ref": "#/$defs/errorEvent" },
     { "$ref": "#/$defs/sessionClosedEvent" }
   ],
@@ -27,13 +36,15 @@
         "type": { "type": "string" },
         "session_id": { "type": "string" },
         "turn_id": { "type": ["string", "null"] },
+        "generation_id": { "type": ["string", "null"] },
         "timestamp": { "type": "string", "format": "date-time" }
       }
     },
     "audioChunk": {
       "type": "object",
-      "required": ["encoding", "sample_rate_hz", "channels", "sequence"],
+      "required": ["data_base64", "encoding", "sample_rate_hz", "channels", "sequence"],
       "properties": {
+        "data_base64": { "type": "string" },
         "encoding": { "type": "string" },
         "sample_rate_hz": { "type": "integer", "minimum": 1 },
         "channels": { "type": "integer", "minimum": 1 },
@@ -62,6 +73,40 @@
             "status": { "const": "ready" }
           },
           "required": ["status"]
+        }
+      ]
+    },
+    "sessionStatusEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "session.status" },
+            "status": {
+              "type": "string",
+              "enum": ["created", "loading", "ready", "listening", "thinking", "speaking", "interrupted", "closed", "failed"]
+            },
+            "reason": { "type": ["string", "null"] }
+          },
+          "required": ["status"]
+        }
+      ]
+    },
+    "vadStateEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "vad.state" },
+            "kind": { "type": "string", "enum": ["start_of_speech", "inference", "end_of_speech"] },
+            "sequence": { "type": "integer", "minimum": 0 },
+            "speaking": { "type": ["boolean", "null"] },
+            "probability": { "type": ["number", "null"] },
+            "timestamp_ms": { "type": ["number", "null"] },
+            "speech_duration_ms": { "type": ["number", "null"] },
+            "silence_duration_ms": { "type": ["number", "null"] }
+          },
+          "required": ["kind", "sequence"]
         }
       ]
     },
@@ -98,26 +143,111 @@
           "properties": {
             "type": { "const": "route.selected" },
             "router_id": { "type": "string" },
+            "route_name": { "type": "string" },
             "llm_engine_id": { "type": ["string", "null"] },
             "provider": { "type": ["string", "null"] },
             "model": { "type": ["string", "null"] },
+            "profile_id": { "type": ["string", "null"] },
             "reason": { "type": ["string", "null"] },
             "confidence": { "type": ["number", "null"] }
           },
-          "required": ["router_id"]
+          "required": ["router_id", "route_name"]
         }
       ]
     },
-    "llmTokenEvent": {
+    "tokenUsage": {
+      "type": "object",
+      "properties": {
+        "input_tokens": { "type": "integer", "minimum": 0 },
+        "output_tokens": { "type": "integer", "minimum": 0 },
+        "reasoning_tokens": { "type": "integer", "minimum": 0 },
+        "cache_read_tokens": { "type": "integer", "minimum": 0 },
+        "cache_write_tokens": { "type": "integer", "minimum": 0 },
+        "total_tokens": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "llmPhaseEvent": {
       "allOf": [
         { "$ref": "#/$defs/baseEvent" },
         {
           "properties": {
-            "type": { "const": "llm.token" },
-            "token": { "type": "string" },
-            "index": { "type": "integer", "minimum": 0 }
+            "type": { "const": "llm.phase" },
+            "phase": { "type": "string", "enum": ["thinking", "generating", "done"] }
           },
-          "required": ["token", "index"]
+          "required": ["phase"]
+        }
+      ]
+    },
+    "llmReasoningDeltaEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "llm.reasoning.delta" },
+            "part_id": { "type": ["string", "null"] },
+            "delta": { "type": "string" }
+          },
+          "required": ["delta"]
+        }
+      ]
+    },
+    "llmResponseDeltaEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "llm.response.delta" },
+            "part_id": { "type": ["string", "null"] },
+            "delta": { "type": "string" },
+            "lane": { "type": "string", "enum": ["speech", "display"] }
+          },
+          "required": ["delta", "lane"]
+        }
+      ]
+    },
+    "llmToolUpdateEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "llm.tool.update" },
+            "call_id": { "type": ["string", "null"] },
+            "tool_name": { "type": "string" },
+            "status": { "type": ["string", "null"] },
+            "tool_input": {},
+            "tool_metadata": { "type": "object", "additionalProperties": true },
+            "tool_output": {},
+            "tool_error": {},
+            "is_mcp": { "type": "boolean" }
+          },
+          "required": ["tool_name", "is_mcp"]
+        }
+      ]
+    },
+    "llmUsageEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "llm.usage" },
+            "usage": { "$ref": "#/$defs/tokenUsage" },
+            "cost": { "type": ["number", "null"] }
+          }
+        }
+      ]
+    },
+    "llmSummaryEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "llm.summary" },
+            "provider": { "type": ["string", "null"] },
+            "model": { "type": ["string", "null"] },
+            "usage": { "$ref": "#/$defs/tokenUsage" },
+            "cost": { "type": ["number", "null"] }
+          }
         }
       ]
     },
@@ -128,7 +258,9 @@
           "properties": {
             "type": { "const": "llm.completed" },
             "text": { "type": "string" },
-            "finish_reason": { "type": ["string", "null"] }
+            "finish_reason": { "type": ["string", "null"] },
+            "provider": { "type": ["string", "null"] },
+            "model": { "type": ["string", "null"] }
           },
           "required": ["text"]
         }
@@ -166,6 +298,40 @@
             "type": { "const": "conversation.interrupted" },
             "reason": { "type": ["string", "null"] }
           }
+        }
+      ]
+    },
+    "turnQueuedEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "turn.queued" },
+            "queue_size": { "type": "integer", "minimum": 0 },
+            "source": { "type": ["string", "null"] },
+            "policy": { "type": ["string", "null"] }
+          },
+          "required": ["queue_size"]
+        }
+      ]
+    },
+    "turnMetricsEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "turn.metrics" },
+            "queue_delay_ms": { "type": ["number", "null"] },
+            "stt_to_route_ms": { "type": ["number", "null"] },
+            "route_to_llm_first_delta_ms": { "type": ["number", "null"] },
+            "llm_first_delta_to_tts_first_chunk_ms": { "type": ["number", "null"] },
+            "stt_to_tts_first_chunk_ms": { "type": ["number", "null"] },
+            "turn_to_first_llm_delta_ms": { "type": ["number", "null"] },
+            "turn_to_complete_ms": { "type": ["number", "null"] },
+            "cancelled": { "type": "boolean" },
+            "reason": { "type": ["string", "null"] }
+          },
+          "required": ["cancelled"]
         }
       ]
     },

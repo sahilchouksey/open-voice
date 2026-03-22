@@ -128,7 +128,7 @@ components:
           enum: [ok]
     EngineDescriptor:
       type: object
-      required: [id, kind, label]
+      required: [id, kind, label, available, status]
       properties:
         id:
           type: string
@@ -139,6 +139,10 @@ components:
           type: string
         default:
           type: boolean
+        available:
+          type: boolean
+        status:
+          type: string
         capabilities:
           type: object
           additionalProperties: true
@@ -173,6 +177,67 @@ components:
           type: string
         tts:
           type: string
+    RouteTarget:
+      type: object
+      properties:
+        llm_engine_id:
+          type: string
+        provider:
+          type: string
+        model:
+          type: string
+        profile_id:
+          type: string
+      additionalProperties: false
+    LlmTool:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        kind:
+          type: string
+          enum: [function, mcp]
+        parameters:
+          type: object
+          additionalProperties: true
+        metadata:
+          type: object
+          additionalProperties: true
+      additionalProperties: false
+    LlmConfig:
+      type: object
+      properties:
+        system_prompt:
+          type: string
+        additional_instructions:
+          type: string
+        tools:
+          type: array
+          items:
+            $ref: "#/components/schemas/LlmTool"
+      additionalProperties: true
+    RuntimeConfig:
+      type: object
+      properties:
+        default_llm_engine_id:
+          type: string
+        route_targets:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteTarget"
+        llm:
+          $ref: "#/components/schemas/LlmConfig"
+        turn_queue:
+          type: object
+          properties:
+            policy:
+              type: string
+              enum: [send_now, enqueue, inject_next_loop]
+          additionalProperties: true
+      additionalProperties: true
     SessionCreateRequest:
       type: object
       properties:
@@ -181,6 +246,8 @@ components:
         metadata:
           type: object
           additionalProperties: true
+        runtime_config:
+          $ref: "#/components/schemas/RuntimeConfig"
     SessionState:
       type: object
       required: [session_id, status, created_at, updated_at, engine_selection]

@@ -32,6 +32,62 @@
       },
       "additionalProperties": false
     },
+    "routeTarget": {
+      "type": "object",
+      "properties": {
+        "llm_engine_id": { "type": "string" },
+        "provider": { "type": "string" },
+        "model": { "type": "string" },
+        "profile_id": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "llmTool": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "kind": { "type": "string", "enum": ["function", "mcp"] },
+        "parameters": { "type": "object", "additionalProperties": true },
+        "metadata": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": false
+    },
+    "llmConfig": {
+      "type": "object",
+      "properties": {
+        "system_prompt": { "type": "string" },
+        "additional_instructions": { "type": "string" },
+        "tools": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/llmTool" }
+        }
+      },
+      "additionalProperties": true
+    },
+    "runtimeConfig": {
+      "type": "object",
+      "properties": {
+        "default_llm_engine_id": { "type": "string" },
+        "route_targets": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/routeTarget" }
+        },
+        "llm": { "$ref": "#/$defs/llmConfig" },
+        "turn_queue": {
+          "type": "object",
+          "properties": {
+            "policy": {
+              "type": "string",
+              "enum": ["send_now", "enqueue", "inject_next_loop"]
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
     "audioChunk": {
       "type": "object",
       "required": ["chunk_id", "sequence", "encoding", "sample_rate_hz", "channels"],
@@ -56,6 +112,7 @@
           "properties": {
             "type": { "const": "session.start" },
             "engine_selection": { "$ref": "#/$defs/engineSelection" },
+            "config": { "$ref": "#/$defs/runtimeConfig" },
             "metadata": {
               "type": "object",
               "additionalProperties": true
@@ -118,10 +175,7 @@
         {
           "properties": {
             "type": { "const": "config.update" },
-            "config": {
-              "type": "object",
-              "additionalProperties": true
-            }
+            "config": { "$ref": "#/$defs/runtimeConfig" }
           },
           "required": ["session_id", "config"]
         }
