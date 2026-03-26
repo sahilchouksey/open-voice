@@ -1,0 +1,9 @@
+node_modules/
+package.json
+bun.lock
+
+!modes/
+!modes/**
+!agent/
+!agent/**
+!.gitignore

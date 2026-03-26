@@ -1,5 +1,6 @@
 temp/
 reference/
+.venv/
 
 __pycache__/
 *.pyc
