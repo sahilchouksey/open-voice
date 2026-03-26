@@ -1718,6 +1718,134 @@ def test_send_now_policy_interrupts_immediately_while_speaking() -> None:
     asyncio.run(_test_send_now_policy_interrupts_immediately_while_speaking())
 
 
+def test_send_now_ignores_short_follow_up_during_cooldown() -> None:
+    asyncio.run(_test_send_now_ignores_short_follow_up_during_cooldown())
+
+
+async def _test_send_now_ignores_short_follow_up_during_cooldown() -> None:
+    session_manager = InMemorySessionManager()
+    stt_registry = SttEngineRegistry()
+    stt_registry.register(
+        MultiStreamFakeSttEngine(
+            [
+                [
+                    [],
+                    [SttEvent(kind=SttEventKind.FINAL, text="first question", sequence=1)],
+                ],
+                [
+                    [],
+                    [SttEvent(kind=SttEventKind.FINAL, text="second question", sequence=2)],
+                ],
+                [
+                    [SttEvent(kind=SttEventKind.FINAL, text="yeah", sequence=3)],
+                    [],
+                ],
+            ]
+        ),
+        default=True,
+    )
+
+    vad_registry = VadEngineRegistry()
+    vad_registry.register(
+        FakeVadEngine(
+            [
+                [VadEvent(kind=VadEventKind.START_OF_SPEECH, sequence=0, timestamp_ms=0.0)],
+                [VadEvent(kind=VadEventKind.START_OF_SPEECH, sequence=1, timestamp_ms=40.0)],
+                [VadEvent(kind=VadEventKind.START_OF_SPEECH, sequence=2, timestamp_ms=80.0)],
+            ]
+        ),
+        default=True,
+    )
+
+    router_registry = RouterEngineRegistry()
+    router_registry.register(FakeRouterEngine("moderate_route"), default=True)
+
+    llm_registry = LlmEngineRegistry()
+    llm_registry.register(EchoDelayedFakeLlmEngine(delay_seconds=0.04), default=True)
+
+    tts_registry = TtsEngineRegistry()
+    tts_registry.register(FakeTtsEngine(), default=True)
+
+    session = RealtimeConversationSession(
+        session_manager,
+        config=RuntimeConfig(),
+        stt_service=SttService(stt_registry),
+        vad_service=VadService(vad_registry),
+        router_service=RouterService(router_registry),
+        llm_service=LlmService(llm_registry),
+        tts_service=TtsService(tts_registry),
+    )
+
+    start_events = await session.apply_message(
+        SessionStartMessage(
+            config={
+                "turn_queue": {"policy": "send_now"},
+                "turn_detection": {"mode": "manual"},
+                "interruption": {"cooldown_ms": 1000},
+            }
+        )
+    )
+    session_id = start_events[0].session_id
+
+    emitted: list[dict[str, Any]] = []
+
+    async def emit(payload: dict[str, Any]) -> None:
+        emitted.append(payload)
+
+    await session.apply(_audio_append_payload(session_id, sequence=0), emit=emit)
+    await session.apply(
+        {
+            "type": "audio.commit",
+            "session_id": session_id,
+        },
+        emit=emit,
+    )
+
+    async def _wait_for_status(status: str, timeout_seconds: float = 1.2) -> None:
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while asyncio.get_running_loop().time() < deadline:
+            if any(
+                item.get("type") == "session.status" and item.get("status") == status
+                for item in emitted
+            ):
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError(f"Timed out waiting for session status '{status}'")
+
+    await _wait_for_status("thinking")
+
+    await session.apply(_audio_append_payload(session_id, sequence=1), emit=emit)
+    await session.apply(
+        {
+            "type": "audio.commit",
+            "session_id": session_id,
+        },
+        emit=emit,
+    )
+
+    await _wait_for_status("thinking")
+
+    await session.apply(_audio_append_payload(session_id, sequence=2), emit=emit)
+    await asyncio.sleep(0.45)
+
+    interrupt_events = [
+        item
+        for item in emitted
+        if item.get("type") == "conversation.interrupted" and item.get("reason") == "send_now"
+    ]
+    assert len(interrupt_events) == 1
+
+    interrupted_generation = interrupt_events[0].get("generation_id")
+    assert isinstance(interrupted_generation, str)
+
+    assert any(
+        item.get("type") == "llm.completed"
+        and item.get("generation_id")
+        and item.get("generation_id") != interrupted_generation
+        for item in emitted
+    )
+
+
 async def _test_send_now_policy_interrupts_immediately_while_speaking() -> None:
     session_manager = InMemorySessionManager()
     stt_registry = SttEngineRegistry()
