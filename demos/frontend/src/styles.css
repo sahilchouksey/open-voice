@@ -475,7 +475,7 @@ button:disabled {
   align-self: stretch;
   min-width: 0;
   margin: 0 auto;
-  overflow: hidden;
+  overflow: visible;
   box-sizing: border-box;
 }
 
@@ -491,9 +491,9 @@ button:disabled {
 }
 
 .grid-viz {
-  --size: min(100%, 50svh);
-  width: min(var(--size), 100%);
-  height: auto;
+  --size: min(100%, 40svh, 42vw);
+  width: var(--size);
+  height: var(--size);
   max-width: 100%;
   max-height: 100%;
   margin-inline: auto;
@@ -916,7 +916,7 @@ button:disabled {
   }
 
   .grid-viz {
-    --size: min(100%, 38svh);
+    --size: min(100%, 38svh, 80vw);
     gap: clamp(7px, 1vw, 9px);
   }
 

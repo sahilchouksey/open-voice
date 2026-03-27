@@ -8,7 +8,7 @@ export default defineConfig({
   root: demoRoot,
   server: {
     host: true,
-    allowedHosts: [".ngrok-free.app"],
+    allowedHosts: [".ngrok-free.app", ".ts.net"],
     proxy: {
       "/v1": {
         target: runtimeProxyTarget,
