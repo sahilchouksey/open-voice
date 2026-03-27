@@ -1,20 +1,23 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="528" height="144" class="svgbob"><style>.svgbob line, .svgbob path, .svgbob circle, .svgbob rect, .svgbob polygon {
-    stroke: black;
+    stroke: white;
     stroke-width: 2;
     stroke-opacity: 1;
     fill-opacity: 1;
     stroke-linecap: round;
     stroke-linejoin: miter;
 }
+.svgbob rect {
+    stroke: black;
+}
 .svgbob text {
     white-space: pre;
-    fill: black;
+    fill: white;
     font-family: Iosevka Fixed, monospace;
     font-size: 14px;
 }
 .svgbob rect.backdrop {
     stroke: none;
-    fill: white;
+    fill: black;
 }
 .svgbob .broken {
     stroke-dasharray: 8;
@@ -23,11 +26,11 @@
     fill: black;
 }
 .svgbob .bg_filled {
-    fill: white;
+    fill: black;
     stroke-width: 1;
 }
 .svgbob .nofill {
-    fill: white;
+    fill: black;
 }
 .svgbob .end_marked_arrow {
     marker-end: url(#arrow);
