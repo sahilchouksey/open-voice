@@ -28,7 +28,7 @@ class SessionStatus(str, Enum):
 @dataclass(frozen=True, slots=True)
 class EngineSelection:
     stt: str | None = None
-    router: str | None = "arch-router"
+    router: str | None = None
     llm: str | None = None
     tts: str | None = None
 

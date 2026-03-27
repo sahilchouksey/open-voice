@@ -44,31 +44,36 @@ export class SessionAudioController {
 
   async onEvent(event: ConversationEvent): Promise<void> {
     return this.enqueue(async () => {
-      if (!this.gate.shouldAccept(event)) {
-        return
-      }
+      try {
+        if (!this.gate.shouldAccept(event)) {
+          return
+        }
 
-      this.gate.observe(event)
+        this.gate.observe(event)
 
-      if (event.type === "conversation.interrupted") {
-        await this.output.flush("conversation.interrupted")
-        return
-      }
+        if (event.type === "conversation.interrupted") {
+          await this.output.flush("conversation.interrupted")
+          return
+        }
 
-      if (event.type === "llm.error") {
+        if (event.type === "llm.error") {
+          this.gate.rejectActiveGeneration()
+          await this.output.flush("llm.error")
+          return
+        }
+
+        const ttsChunk = extractTtsChunk(event)
+        if (ttsChunk) {
+          await this.output.appendTtsChunk(ttsChunk)
+          return
+        }
+
+        if (event.type === "tts.completed") {
+          return
+        }
+      } catch {
         this.gate.rejectActiveGeneration()
-        await this.output.flush("llm.error")
-        return
-      }
-
-      const ttsChunk = extractTtsChunk(event)
-      if (ttsChunk) {
-        await this.output.appendTtsChunk(ttsChunk)
-        return
-      }
-
-      if (event.type === "tts.completed") {
-        return
+        await this.output.flush("audio.output.error_recovery")
       }
     })
   }

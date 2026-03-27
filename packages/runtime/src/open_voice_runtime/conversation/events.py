@@ -142,10 +142,6 @@ class SttPartialEvent(BaseConversationEvent):
 class SttFinalEvent(BaseConversationEvent):
     text: str = ""
     confidence: float | None = None
-    revision: int | None = None
-    finality: str | None = None
-    deferred: bool | None = None
-    previous_text: str | None = None
 
     def __init__(
         self,
@@ -154,10 +150,6 @@ class SttFinalEvent(BaseConversationEvent):
         *,
         turn_id: str | None = None,
         confidence: float | None = None,
-        revision: int | None = None,
-        finality: str | None = None,
-        deferred: bool | None = None,
-        previous_text: str | None = None,
     ) -> None:
         BaseConversationEvent.__init__(
             self,
@@ -167,10 +159,6 @@ class SttFinalEvent(BaseConversationEvent):
         )
         self.text = text
         self.confidence = confidence
-        self.revision = revision
-        self.finality = finality
-        self.deferred = deferred
-        self.previous_text = previous_text
 
 
 @dataclass(slots=True)

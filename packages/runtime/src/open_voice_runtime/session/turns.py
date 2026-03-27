@@ -201,6 +201,8 @@ class TurnRecognition:
 
     def fake_commit_result(self, session_id: str) -> TurnRecognitionResult:
         buffer = self.buffer_for(session_id)
+        if not buffer.chunks:
+            return TurnRecognitionResult(stt_events=[], final_text=None, should_auto_commit=False)
         text = _render_fake_transcript(buffer)
         stt_events = [
             SttEvent(

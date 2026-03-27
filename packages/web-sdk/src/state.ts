@@ -19,13 +19,6 @@ export interface VoiceSessionState {
   stt: {
     interimText: string
     finalText: string
-    status?: "queued" | "transcribing" | "stabilizing" | "waiting_final" | "retry_scheduled"
-    waitedMs?: number | null
-    attempt?: number | null
-    revision?: number | null
-    finality?: "stable" | "revised" | "duplicate" | null
-    deferred?: boolean | null
-    previousText?: string | null
     lastFinalTurnId?: string | null
     lastFinalText?: string | null
   }
@@ -73,13 +66,6 @@ export function createVoiceSessionState(sessionId: string): VoiceSessionState {
     stt: {
       interimText: "",
       finalText: "",
-      status: undefined,
-      waitedMs: null,
-      attempt: null,
-      revision: null,
-      finality: null,
-      deferred: null,
-      previousText: null,
       lastFinalTurnId: null,
       lastFinalText: null,
     },
@@ -134,14 +120,7 @@ export function reduceVoiceSessionEvent(
       next.turnPhase = deriveTurnPhase(next)
       return next
     case "stt.partial":
-      next.stt.status = "transcribing"
       next.stt.interimText = event.text
-      next.turnPhase = deriveTurnPhase(next)
-      return next
-    case "stt.status":
-      next.stt.status = event.status
-      next.stt.waitedMs = event.waited_ms ?? null
-      next.stt.attempt = event.attempt ?? null
       next.turnPhase = deriveTurnPhase(next)
       return next
     case "stt.final":
@@ -152,12 +131,6 @@ export function reduceVoiceSessionEvent(
         return next
       }
       next.stt.finalText = event.text
-      next.stt.status = "waiting_final"
-      next.stt.revision = event.revision ?? null
-      next.stt.finality = event.finality ?? null
-      next.stt.deferred = event.deferred ?? null
-      next.stt.previousText = event.previous_text ?? null
-      next.stt.waitedMs = null
       next.stt.lastFinalTurnId = event.turn_id ?? null
       next.stt.lastFinalText = event.text
       next.stt.interimText = ""
@@ -198,8 +171,6 @@ export function reduceVoiceSessionEvent(
         next.sessionStatus = "listening"
       }
       next.tts.status = "idle"
-      next.stt.status = undefined
-      next.stt.waitedMs = null
       next.turnPhase = deriveTurnPhase(next)
       return next
     case "error": {
@@ -227,8 +198,6 @@ export function reduceVoiceSessionEvent(
       return next
     case "conversation.interrupted":
       next.queue.pendingTurns = 0
-      next.stt.status = undefined
-      next.stt.waitedMs = null
       next.turnPhase = "idle"
       return next
     case "turn.queued":

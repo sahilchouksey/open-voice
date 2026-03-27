@@ -240,17 +240,6 @@ export interface SttFinalEvent extends BaseConversationEvent {
   type: "stt.final"
   text: string
   confidence?: number | null
-  revision?: number | null
-  finality?: "stable" | "revised" | "duplicate" | null
-  deferred?: boolean | null
-  previous_text?: string | null
-}
-
-export interface SttStatusEvent extends BaseConversationEvent {
-  type: "stt.status"
-  status: "queued" | "transcribing" | "stabilizing" | "waiting_final" | "retry_scheduled"
-  waited_ms?: number | null
-  attempt?: number | null
 }
 
 export interface RouteSelectedEvent extends BaseConversationEvent {
@@ -397,7 +386,6 @@ export type ConversationEvent =
   | VadStateEvent
   | SttPartialEvent
   | SttFinalEvent
-  | SttStatusEvent
   | RouteSelectedEvent
   | LlmPhaseEvent
   | LlmReasoningDeltaEvent

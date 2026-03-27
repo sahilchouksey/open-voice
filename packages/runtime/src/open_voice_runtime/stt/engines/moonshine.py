@@ -211,10 +211,10 @@ class MoonshineSttEngine(BaseSttEngine):
 def _moonshine_update_interval_seconds() -> float:
     raw = os.getenv("OPEN_VOICE_MOONSHINE_UPDATE_INTERVAL_MS")
     if raw is None:
-        return 0.06
+        return 0.08
     try:
         value_ms = float(raw)
     except (TypeError, ValueError):
-        return 0.06
-    value_ms = max(20.0, min(250.0, value_ms))
+        return 0.08
+    value_ms = max(40.0, min(200.0, value_ms))
     return value_ms / 1000.0
