@@ -19,6 +19,7 @@ const els = {
   micMeta: document.getElementById("micMeta"),
   micState: document.getElementById("micState"),
   sttState: document.getElementById("sttState"),
+  sttMeta: document.getElementById("sttMeta"),
   sttText: document.getElementById("sttText"),
   routerState: document.getElementById("routerState"),
   routerText: document.getElementById("routerText"),
@@ -79,6 +80,16 @@ const state = {
     queuePending: 0,
     queuePolicy: "enqueue",
   },
+  eventChain: Promise.resolve(),
+  micLifecycleToken: 0,
+  suppressTtsUntilNextUserFinal: false,
+  pendingTurn: {
+    startedAt: null,
+    phase: "idle",
+    timer: null,
+    clientTurnId: null,
+    retryTimer: null,
+  },
 }
 
 const OPEN_VOICE_SYSTEM_PROMPT = [
@@ -89,6 +100,15 @@ const OPEN_VOICE_SYSTEM_PROMPT = [
   "Never guess or rely on stale memory for news, politics, markets, sports, weather, or other live facts.",
   "Use tools when needed, but never expose internal routing, model, or tool implementation details.",
 ].join(" ")
+
+const DEMO_MIN_SPEECH_DURATION_MS = 180
+const DEMO_VAD_ACTIVATION_THRESHOLD = 0.62
+const DEMO_UI_VAD_PROBABILITY_THRESHOLD = 0.75
+const DEMO_INTERRUPT_COOLDOWN_MS = 1200
+const DEMO_INTERRUPT_MIN_WORDS = 2
+const DEMO_PENDING_TURN_SLOW_MS = 2000
+const DEMO_PENDING_TURN_DEGRADED_MS = 8000
+const DEMO_PENDING_TURN_TIMEOUT_MS = 25000
 
 function formatMs(value) {
   if (value == null || Number.isNaN(value)) return "-"
@@ -210,9 +230,13 @@ class BrowserMicInput {
     this.processor = null
     this.source = null
     this.stream = null
+    this.running = false
+    this.captureToken = 0
   }
 
   async start() {
+    const captureToken = ++this.captureToken
+    this.running = true
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         sampleRate: { ideal: 24000 },
@@ -225,7 +249,8 @@ class BrowserMicInput {
     this.ctx = new AudioContext({ sampleRate: 24000 })
     this.source = this.ctx.createMediaStreamSource(this.stream)
     this.processor = this.ctx.createScriptProcessor(4096, 1, 1)
-    this.processor.onaudioprocess = async (event) => {
+    this.processor.onaudioprocess = (event) => {
+      if (!this.running || captureToken !== this.captureToken) return
       const channel = event.inputBuffer.getChannelData(0)
       let peak = 0
       const pcm = new Int16Array(channel.length)
@@ -234,28 +259,38 @@ class BrowserMicInput {
         peak = Math.max(peak, Math.abs(sample))
         pcm[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff
       }
-      this.onLevel(peak)
-      await this.onChunk({
-        type: "audio.append",
-        session_id: state.sessionId,
-        chunk: {
-          chunk_id: `${state.sessionId}:${this.sequence}`,
-          sequence: this.sequence,
-          encoding: "pcm_s16le",
-          sample_rate_hz: this.ctx.sampleRate,
-          channels: 1,
-          duration_ms: (pcm.length / this.ctx.sampleRate) * 1000,
-          transport: "inline-base64",
-          data_base64: arrayBufferToBase64(pcm.buffer),
-        },
-      })
+      if (!this.running || captureToken !== this.captureToken) return
+      const sampleRate = this.ctx?.sampleRate || 24000
+      const sequence = this.sequence
       this.sequence += 1
+      this.onLevel(peak)
+      void Promise.resolve(
+        this.onChunk({
+          type: "audio.append",
+          session_id: state.sessionId,
+          chunk: {
+            chunk_id: `${state.sessionId}:${sequence}`,
+            sequence,
+            encoding: "pcm_s16le",
+            sample_rate_hz: sampleRate,
+            channels: 1,
+            duration_ms: (pcm.length / sampleRate) * 1000,
+            transport: "inline-base64",
+            data_base64: arrayBufferToBase64(pcm.buffer),
+          },
+        }),
+      ).catch(() => undefined)
     }
     this.source.connect(this.processor)
     this.processor.connect(this.ctx.destination)
   }
 
   async stop() {
+    this.running = false
+    this.captureToken += 1
+    if (this.processor) {
+      this.processor.onaudioprocess = null
+    }
     this.processor?.disconnect()
     this.source?.disconnect()
     this.stream?.getTracks().forEach((track) => track.stop())
@@ -410,6 +445,104 @@ function renderThinkingPanel() {
     parts.push(`Tools:\n${state.toolLines.join("\n")}`)
   }
   els.thinkingText.textContent = parts.join("\n\n") || "No reasoning yet."
+}
+
+function noteRejectedGeneration(generationId) {
+  if (!generationId) return
+  state.rejectedGenerationIds.add(generationId)
+  if (state.rejectedGenerationIds.size > 32) {
+    const oldest = state.rejectedGenerationIds.values().next().value
+    if (oldest) state.rejectedGenerationIds.delete(oldest)
+  }
+}
+
+async function hardStopOutput(reason = "interrupt") {
+  if (state.activeGenerationId) {
+    noteRejectedGeneration(state.activeGenerationId)
+  }
+  state.suppressTtsUntilNextUserFinal = true
+  await state.pcmPlayer?.close().catch(() => {})
+  state.pcmPlayer = new StreamingPcmPlayer()
+  state.thinkingPlayer?.stop()
+  stopToolAnnouncement()
+  els.ttsMeta.textContent = `Audio cleared (${reason})`
+}
+
+function clearPendingTurn() {
+  if (state.pendingTurn.timer) {
+    window.clearInterval(state.pendingTurn.timer)
+    state.pendingTurn.timer = null
+  }
+  state.pendingTurn.startedAt = null
+  state.pendingTurn.phase = "idle"
+  state.pendingTurn.clientTurnId = null
+  if (state.pendingTurn.retryTimer) {
+    window.clearTimeout(state.pendingTurn.retryTimer)
+    state.pendingTurn.retryTimer = null
+  }
+}
+
+function pendingTurnMessage() {
+  const startedAt = state.pendingTurn.startedAt
+  if (!startedAt) return ""
+  const elapsedMs = Date.now() - startedAt
+  const elapsedSec = Math.max(1, Math.round(elapsedMs / 1000))
+  if (state.pendingTurn.phase === "awaiting_backend") {
+    return "Server confirmed. Waiting for transcript..."
+  }
+  if (state.pendingTurn.phase === "retry_scheduled") {
+    return `Retrying turn shortly (${elapsedSec}s)...`
+  }
+  if (elapsedMs >= DEMO_PENDING_TURN_TIMEOUT_MS) {
+    state.pendingTurn.phase = "timeout"
+    return `Taking longer than usual (${elapsedSec}s). You can interrupt and retry.`
+  }
+  if (elapsedMs >= DEMO_PENDING_TURN_DEGRADED_MS) {
+    state.pendingTurn.phase = "degraded"
+    return `Delayed response (${elapsedSec}s). Network or STT may be slow.`
+  }
+  if (elapsedMs >= DEMO_PENDING_TURN_SLOW_MS) {
+    state.pendingTurn.phase = "slow"
+    return `Still waiting for transcript (${elapsedSec}s)...`
+  }
+  state.pendingTurn.phase = "commit_sent"
+  return "Audio sent. Waiting for server confirmation..."
+}
+
+function renderPendingTurnHint() {
+  const msg = pendingTurnMessage()
+  if (!msg) {
+    if (els.ttsMeta.textContent?.startsWith("Audio sent.")) {
+      els.ttsMeta.textContent = "Waiting for assistant response..."
+    }
+    return
+  }
+  els.ttsMeta.textContent = msg
+}
+
+function startPendingTurn(trigger = "commit") {
+  if (state.pendingTurn.startedAt) return null
+  state.pendingTurn.startedAt = Date.now()
+  state.pendingTurn.phase = "commit_sent"
+  state.pendingTurn.clientTurnId = `ct_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+  renderPendingTurnHint()
+  if (state.pendingTurn.timer) {
+    window.clearInterval(state.pendingTurn.timer)
+  }
+  state.pendingTurn.timer = window.setInterval(() => {
+    renderPendingTurnHint()
+  }, 300)
+  console.info("[PENDING_TURN] start", { trigger, client_turn_id: state.pendingTurn.clientTurnId })
+  return state.pendingTurn.clientTurnId
+}
+
+function resolvePendingTurn(via) {
+  const startedAt = state.pendingTurn.startedAt
+  if (startedAt) {
+    const elapsed = Date.now() - startedAt
+    console.info("[PENDING_TURN] resolved", { via, elapsed_ms: elapsed })
+  }
+  clearPendingTurn()
 }
 
 function resetAssistantPanels(turnId = null) {
@@ -630,6 +763,7 @@ function sendJson(payload) {
 }
 
 async function connect() {
+  clearPendingTurn()
   const sessionState = await requestJson("/v1/sessions", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -649,15 +783,21 @@ async function connect() {
         turn_detection: {
           mode: "hybrid",
           transcript_timeout_ms: 250,
+          stabilization_ms: 700,
           min_silence_duration_ms: 500,
-          min_speech_duration_ms: 80,
+          min_speech_duration_ms: DEMO_MIN_SPEECH_DURATION_MS,
+          activation_threshold: DEMO_VAD_ACTIVATION_THRESHOLD,
         },
         turn_queue: {
           policy: els.turnQueuePolicy.value || "enqueue",
         },
         interruption: {
           mode: els.interruptMode?.value || "immediate",
-          cooldown_ms: parseInt(els.interruptCooldown?.value || "300", 10),
+          min_words: DEMO_INTERRUPT_MIN_WORDS,
+          cooldown_ms: parseInt(
+            els.interruptCooldown?.value || String(DEMO_INTERRUPT_COOLDOWN_MS),
+            10,
+          ),
         },
         endpointing: {
           mode: els.endpointingMode?.value || "fixed",
@@ -683,10 +823,15 @@ async function connect() {
   socket.addEventListener("message", async (event) => {
     const payload = JSON.parse(event.data)
     appendEvent(payload)
-    await handleEvent(payload)
+    state.eventChain = state.eventChain
+      .then(() => handleEvent(payload))
+      .catch(() => undefined)
+    await state.eventChain
   })
 
   socket.addEventListener("close", async () => {
+    clearPendingTurn()
+    state.micLifecycleToken += 1
     stopToolAnnouncement()
     await state.mic?.stop().catch(() => {})
     state.mic = null
@@ -712,15 +857,21 @@ async function connect() {
       turn_detection: {
         mode: "hybrid",
         transcript_timeout_ms: 1000,
+        stabilization_ms: 700,
         min_silence_duration_ms: 2000,
-        min_speech_duration_ms: 80,
+        min_speech_duration_ms: DEMO_MIN_SPEECH_DURATION_MS,
+        activation_threshold: DEMO_VAD_ACTIVATION_THRESHOLD,
       },
       turn_queue: {
         policy: els.turnQueuePolicy.value || "enqueue",
       },
       interruption: {
         mode: els.interruptMode?.value || "immediate",
-        cooldown_ms: parseInt(els.interruptCooldown?.value || "300", 10),
+        min_words: DEMO_INTERRUPT_MIN_WORDS,
+        cooldown_ms: parseInt(
+          els.interruptCooldown?.value || String(DEMO_INTERRUPT_COOLDOWN_MS),
+          10,
+        ),
       },
       endpointing: {
         mode: els.endpointingMode?.value || "fixed",
@@ -736,6 +887,8 @@ async function connect() {
 }
 
 async function disconnect() {
+  clearPendingTurn()
+  state.micLifecycleToken += 1
   await state.mic?.stop().catch(() => {})
   state.mic = null
   stopToolAnnouncement()
@@ -749,9 +902,11 @@ async function disconnect() {
   state.pcmPlayer = null
   // Clear rejected generations on disconnect
   state.rejectedGenerationIds.clear()
+  state.suppressTtsUntilNextUserFinal = false
 }
 
 async function startListening() {
+  const lifecycleToken = ++state.micLifecycleToken
   if (!window.isSecureContext) {
     throw new Error("Microphone requires HTTPS (or localhost). Use a secure URL.")
   }
@@ -760,33 +915,82 @@ async function startListening() {
   }
   state.mic = new BrowserMicInput(async (message) => sendJson(message), setMicLevel)
   await state.mic.start()
+  if (lifecycleToken !== state.micLifecycleToken || !state.sessionId) {
+    await state.mic?.stop().catch(() => {})
+    state.mic = null
+    return
+  }
   els.sessionStatus.textContent = "listening"
-  setBadge(els.turnState, "live", "speaking")
+  state.sessionState.turnPhase = "listening"
+  state.sessionState.vadSpeaking = false
   setButtons(true, true)
+  syncUiFromSessionState()
 }
 
 async function stopListening() {
+  state.micLifecycleToken += 1
   await state.mic?.stop()
   state.mic = null
-  setBadge(els.turnState, "idle", "idle")
+  state.sessionState.vadSpeaking = false
+  if (state.sessionId) {
+    const clientTurnId = startPendingTurn("mic_stop_commit")
+    sendJson({
+      type: "audio.commit",
+      session_id: state.sessionId,
+      client_turn_id: clientTurnId,
+    })
+  }
+  if (
+    state.sessionState.sessionStatus === "thinking"
+    || state.sessionState.sessionStatus === "transcribing"
+    || state.sessionState.sessionStatus === "speaking"
+  ) {
+    state.sessionState.turnPhase = "processing"
+  } else {
+    state.sessionState.turnPhase = "idle"
+  }
   setButtons(true, false)
+  syncUiFromSessionState()
 }
 
 async function handleEvent(event) {
+  const eventGenerationId = event.generation_id || null
+
   if (event.type === "session.ready") {
+    resolvePendingTurn("session.ready")
     state.sessionState.sessionStatus = "ready"
-    state.sessionState.turnPhase = "listening"
+    state.sessionState.turnPhase = state.mic ? "listening" : "idle"
     syncUiFromSessionState()
     return
   }
+  if (event.type === "turn.accepted") {
+    if (
+      state.pendingTurn.clientTurnId
+      && event.client_turn_id === state.pendingTurn.clientTurnId
+    ) {
+      state.pendingTurn.phase = "awaiting_backend"
+      renderPendingTurnHint()
+    }
+    return
+  }
   if (event.type === "session.status") {
+    if (eventGenerationId && state.rejectedGenerationIds.has(eventGenerationId)) {
+      return
+    }
     state.sessionState.sessionStatus = event.status
-    if (event.status === "thinking") {
+    if (event.status === "transcribing" || event.status === "thinking") {
+      resolvePendingTurn(`session.status.${event.status}`)
       state.sessionState.turnPhase = "processing"
     } else if (event.status === "speaking") {
+      resolvePendingTurn("session.status.speaking")
+      if (state.suppressTtsUntilNextUserFinal) {
+        return
+      }
       state.sessionState.turnPhase = "agent_speaking"
     } else if (event.status === "listening" || event.status === "ready") {
-      state.sessionState.turnPhase = state.sessionState.vadSpeaking ? "user_speaking" : "listening"
+      state.sessionState.turnPhase = state.mic
+        ? (state.sessionState.vadSpeaking ? "user_speaking" : "listening")
+        : "idle"
     } else {
       state.sessionState.turnPhase = "idle"
     }
@@ -798,30 +1002,101 @@ async function handleEvent(event) {
       state.sessionState.vadSpeaking = event.speaking
     }
     state.sessionState.vadProbability = event.probability ?? null
+    const canRenderUserSpeech =
+      state.sessionState.sessionStatus === "listening"
+      || state.sessionState.sessionStatus === "ready"
+    const confidentInferenceSpeech =
+      event.kind === "inference"
+      && event.speaking === true
+      && typeof event.probability === "number"
+      && event.probability >= DEMO_UI_VAD_PROBABILITY_THRESHOLD
+    const speechStartDetected = event.kind === "start_of_speech" || confidentInferenceSpeech
     
     // Check if speech just ended
     if (!event.speaking && event.kind === "end_of_speech") {
       state.sessionState.turnPhase = "speech_ended"
       setBadge(els.micState, "live", "stopped")
       els.micMeta.textContent = "Speech ended, processing..."
-    } else if (event.speaking) {
+      if (
+        state.sessionId
+        && state.mic
+        && (state.sessionState.sessionStatus === "listening"
+          || state.sessionState.sessionStatus === "ready")
+      ) {
+        const clientTurnId = startPendingTurn("vad_end_commit")
+        sendJson({
+          type: "audio.commit",
+          session_id: state.sessionId,
+          client_turn_id: clientTurnId,
+        })
+      }
+    } else if (speechStartDetected && canRenderUserSpeech) {
+      resolvePendingTurn("vad.speech_start")
       state.sessionState.turnPhase = "user_speaking"
       setBadge(els.micState, "busy", "speaking")
       els.micMeta.textContent = "Live mic level " + (state.micLevel || 0) + "%"
     } else {
-      state.sessionState.turnPhase = state.sessionState.sessionStatus === "listening" ? "listening" : state.sessionState.turnPhase
+      state.sessionState.turnPhase =
+        (state.sessionState.sessionStatus === "listening"
+        || state.sessionState.sessionStatus === "ready")
+          ? (state.mic ? "listening" : "idle")
+          : state.sessionState.turnPhase
     }
     syncUiFromSessionState()
     return
   }
   if (event.type === "stt.partial") {
+    resolvePendingTurn("stt.partial")
     setBadge(els.sttState, "busy", "listening")
     els.sttText.textContent = event.text || "..."
-    state.sessionState.turnPhase = state.sessionState.vadSpeaking ? "user_speaking" : "listening"
+    const hasPartialText = Boolean(event.text && event.text.trim())
+    state.sessionState.turnPhase = hasPartialText && state.mic
+      ? "user_speaking"
+      : (state.mic ? "listening" : "idle")
     syncUiFromSessionState()
     return
   }
+  if (event.type === "stt.status") {
+    if (event.status === "queued") {
+      setBadge(els.sttState, "busy", `queued${event.attempt ? ` (${event.attempt})` : ""}`)
+      if (els.sttMeta) {
+        els.sttMeta.textContent = `Turn accepted${event.attempt ? ` (attempt ${event.attempt})` : ""}.`
+      }
+    }
+    if (event.status === "transcribing") {
+      setBadge(els.sttState, "busy", "transcribing")
+      if (els.sttMeta) els.sttMeta.textContent = "Transcribing audio..."
+    }
+    if (event.status === "waiting_final") {
+      if (els.sttMeta) els.sttMeta.textContent = "Waiting for final transcript..."
+    }
+    if (event.status === "retry_scheduled") {
+      state.pendingTurn.phase = "retry_scheduled"
+      renderPendingTurnHint()
+      if (state.pendingTurn.retryTimer) {
+        window.clearTimeout(state.pendingTurn.retryTimer)
+      }
+      const waitedMs = Number.isFinite(event.waited_ms) ? event.waited_ms : 0
+      state.pendingTurn.retryTimer = window.setTimeout(() => {
+        state.pendingTurn.retryTimer = null
+        state.pendingTurn.phase = "commit_sent"
+        renderPendingTurnHint()
+      }, Math.max(0, waitedMs))
+    }
+    if (event.status === "stabilizing") {
+      setBadge(els.sttState, "busy", "stabilizing")
+      if (els.sttMeta) {
+        const sec = Math.max(0, Math.round((event.waited_ms || 0) / 1000))
+        els.sttMeta.textContent = sec > 0 ? `Stabilizing transcript (${sec}s)...` : "Stabilizing transcript..."
+      }
+    }
+    if (event.status === "waiting_final") {
+      setBadge(els.sttState, "busy", "waiting final")
+    }
+    return
+  }
   if (event.type === "stt.final") {
+    resolvePendingTurn("stt.final")
     const incomingGenerationId = event.generation_id || null
     const incomingTurnId = event.turn_id || null
     const sameGeneration = Boolean(
@@ -834,21 +1109,23 @@ async function handleEvent(event) {
 
     if (shouldInterruptCurrentAudio) {
       console.log(`[INTERRUPT] stt.final indicates new turn; stopping generation ${state.activeGenerationId}`)
-      state.rejectedGenerationIds.add(state.activeGenerationId)
-      await state.pcmPlayer?.close().catch(() => {})
-      state.pcmPlayer = new StreamingPcmPlayer()
-      state.thinkingPlayer?.stop()
-      if (state.rejectedGenerationIds.size > 10) {
-        const iterator = state.rejectedGenerationIds.values()
-        state.rejectedGenerationIds.delete(iterator.next().value)
-      }
+      noteRejectedGeneration(state.activeGenerationId)
+      await hardStopOutput("new_user_final")
     }
+    state.suppressTtsUntilNextUserFinal = false
     resetAssistantPanels(event.turn_id || null)
     setBadge(els.sttState, "live", "final")
     setBadge(els.routerState, "busy", "routing")
     setBadge(els.llmState, "busy", "queued")
     setBadge(els.ttsState, "idle", "waiting")
     els.sttText.textContent = event.text || "-"
+    if (event.finality === "revised") {
+      els.sttMeta.textContent = `Revised transcript (r${event.revision || 1})`
+    } else if (event.finality === "duplicate") {
+      els.sttMeta.textContent = `Duplicate final (r${event.revision || 1})`
+    } else {
+      els.sttMeta.textContent = `Final transcript (r${event.revision || 1})`
+    }
     els.routerText.textContent = "Selecting route..."
     els.ttsMeta.textContent = "Waiting for assistant response..."
     appendUserFinalTranscript(event)
@@ -860,6 +1137,10 @@ async function handleEvent(event) {
     return
   }
   if (event.type === "route.selected") {
+    resolvePendingTurn("route.selected")
+    if (eventGenerationId && state.rejectedGenerationIds.has(eventGenerationId)) {
+      return
+    }
     state.sessionState.routeName = event.route_name
     state.sessionState.provider = event.provider || null
     state.sessionState.model = event.model || null
@@ -900,6 +1181,10 @@ async function handleEvent(event) {
     return
   }
   if (event.type === "llm.phase") {
+    resolvePendingTurn("llm.phase")
+    if (eventGenerationId && state.rejectedGenerationIds.has(eventGenerationId)) {
+      return
+    }
     if (event.turn_id) {
       resetAssistantPanels(event.turn_id)
     }
@@ -924,7 +1209,27 @@ async function handleEvent(event) {
     syncUiFromSessionState()
     return
   }
+  if (event.type === "llm.error") {
+    resolvePendingTurn("llm.error")
+    if (eventGenerationId && state.rejectedGenerationIds.has(eventGenerationId)) {
+      return
+    }
+    state.thinkingPlayer?.stop()
+    stopToolAnnouncement()
+    setBadge(els.llmState, "error", "error")
+    setBadge(els.ttsState, "error", "error")
+    const message = event.error?.message || "unknown error"
+    els.sessionStatus.textContent = `llm error: ${message}`
+    state.sessionState.turnPhase = "idle"
+    if (els.sttMeta) els.sttMeta.textContent = "Waiting for transcript..."
+    syncUiFromSessionState()
+    return
+  }
   if (event.type === "llm.reasoning.delta") {
+    resolvePendingTurn("llm.reasoning.delta")
+    if (eventGenerationId && state.rejectedGenerationIds.has(eventGenerationId)) {
+      return
+    }
     if (event.turn_id) {
       resetAssistantPanels(event.turn_id)
     }
@@ -933,6 +1238,10 @@ async function handleEvent(event) {
     return
   }
   if (event.type === "llm.response.delta") {
+    resolvePendingTurn("llm.response.delta")
+    if (eventGenerationId && state.rejectedGenerationIds.has(eventGenerationId)) {
+      return
+    }
     if (event.turn_id) {
       resetAssistantPanels(event.turn_id)
     }
@@ -958,6 +1267,10 @@ async function handleEvent(event) {
     return
   }
   if (event.type === "llm.tool.update") {
+    resolvePendingTurn("llm.tool.update")
+    if (eventGenerationId && state.rejectedGenerationIds.has(eventGenerationId)) {
+      return
+    }
     if (event.turn_id) {
       resetAssistantPanels(event.turn_id)
     }
@@ -976,10 +1289,12 @@ async function handleEvent(event) {
     return
   }
   if (event.type === "llm.usage") {
+    resolvePendingTurn("llm.usage")
     appendToolLine(formatUsage(event))
     return
   }
   if (event.type === "llm.summary") {
+    resolvePendingTurn("llm.summary")
     const provider = event.provider || "-"
     const model = event.model || "-"
     appendToolLine(`[summary] ${provider}/${model}`)
@@ -993,6 +1308,10 @@ async function handleEvent(event) {
     return
   }
   if (event.type === "llm.completed") {
+    resolvePendingTurn("llm.completed")
+    if (eventGenerationId && state.rejectedGenerationIds.has(eventGenerationId)) {
+      return
+    }
     if (event.turn_id) {
       resetAssistantPanels(event.turn_id)
     }
@@ -1007,6 +1326,10 @@ async function handleEvent(event) {
     return
   }
   if (event.type === "tts.chunk" && event.chunk?.data_base64) {
+    resolvePendingTurn("tts.chunk")
+    if (state.suppressTtsUntilNextUserFinal) {
+      return
+    }
     // CRITICAL FIX: Validate generation_id to reject in-flight chunks from interrupted generation
     const chunkGenerationId = event.generation_id
     // Reject if this generation was previously interrupted
@@ -1040,37 +1363,33 @@ async function handleEvent(event) {
     return
   }
   if (event.type === "tts.completed") {
+    resolvePendingTurn("tts.completed")
     setBadge(els.ttsState, "live", "complete")
     els.ttsMeta.textContent = `${(event.duration_ms || 0).toFixed(0)} ms generated`
-    state.sessionState.turnPhase = state.sessionState.sessionStatus === "listening" ? "listening" : "idle"
+    state.sessionState.turnPhase =
+      state.sessionState.sessionStatus === "listening" && state.mic ? "listening" : "idle"
     syncUiFromSessionState()
     return
   }
   if (event.type === "conversation.interrupted") {
+    resolvePendingTurn("conversation.interrupted")
+    state.suppressTtsUntilNextUserFinal = true
     state.sessionState.turnPhase = "idle"
     state.sessionState.queuePending = 0
     setBadge(els.turnState, "idle", "interrupted")
     // CRITICAL FIX: Stop audio playback immediately on interrupt
     // This is a backup for cases where stt.final didn't handle it
-    await state.pcmPlayer?.close().catch(() => {})
-    state.pcmPlayer = new StreamingPcmPlayer()
-    // Stop thinking audio on interrupt
-    state.thinkingPlayer?.stop()
-    stopToolAnnouncement()
+    await hardStopOutput("conversation.interrupted")
     // Clear any pending audio chunks
     els.ttsMeta.textContent = "Interrupted - audio cleared"
     // CRITICAL FIX: Add current generation to rejected set
     // Note: Don't clear activeGenerationId here - let stt.final handle that
     // This prevents race where TTS chunks arrive between interrupt and next stt.final
     if (state.activeGenerationId) {
-      state.rejectedGenerationIds.add(state.activeGenerationId)
+      noteRejectedGeneration(state.activeGenerationId)
       console.log(`[INTERRUPT] Added generation ${state.activeGenerationId} to rejected set`)
     }
-    // Cleanup old rejected IDs to prevent memory leak (keep last 10)
-    if (state.rejectedGenerationIds.size > 10) {
-      const iterator = state.rejectedGenerationIds.values()
-      state.rejectedGenerationIds.delete(iterator.next().value)
-    }
+    if (els.sttMeta) els.sttMeta.textContent = "Waiting for transcript..."
     renderQueueAndMetrics()
     return
   }
@@ -1098,6 +1417,8 @@ els.listenBtn.addEventListener("click", () => {
 els.stopBtn.addEventListener("click", () => void stopListening())
 els.interruptBtn.addEventListener("click", () => {
   if (!state.sessionId) return
+  resolvePendingTurn("manual_interrupt")
+  void hardStopOutput("manual_interrupt")
   sendJson({ type: "conversation.interrupt", session_id: state.sessionId, reason: "demo" })
 })
 
@@ -1113,8 +1434,10 @@ els.miniInterruptBtn?.addEventListener("click", () => els.interruptBtn.click())
 setButtons(false)
 setBadge(els.turnState, "idle", "idle")
 setBadge(els.sttState, "idle", "waiting")
+if (els.sttMeta) els.sttMeta.textContent = "Waiting for transcript..."
 setBadge(els.routerState, "idle", "waiting")
 setBadge(els.llmState, "idle", "waiting")
 setBadge(els.ttsState, "idle", "waiting")
 activateTab("detailed")
 updateMinimalUi()
+renderPendingTurnHint()

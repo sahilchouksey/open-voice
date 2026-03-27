@@ -14,15 +14,59 @@ if str(RUNTIME_SRC) not in sys.path:
     sys.path.insert(0, str(RUNTIME_SRC))
 
 from open_voice_runtime.app.server import create_server
+from open_voice_runtime.app.dependencies import build_runtime_dependencies
 from open_voice_runtime.transport.http.fastapi import install_http_routes
 from open_voice_runtime.transport.websocket.fastapi import install_realtime_route
 
-os.environ.setdefault(
-    "OPEN_VOICE_KOKORO_ONNX_ASSET_DIR",
-    str(ROOT / "packages" / "runtime" / ".models" / "kokoro-onnx"),
-)
-os.environ.setdefault("OPEN_VOICE_OPENCODE_DIRECTORY", str(ROOT))
-os.environ.setdefault("OPEN_VOICE_OPENCODE_ENABLE_EXA", "1")
+
+def _load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+_load_env_file(ROOT / "demos" / ".env")
+_load_env_file(ROOT / "demos" / ".env.local")
+
+
+# ── Register Parakeet STT Engine ──────────────────────────────────────────────
+BACKEND_DIR = Path(__file__).resolve().parent
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+
+def _register_parakeet_stt(stt_registry) -> None:
+    """Register Parakeet v2 STT engine if available."""
+    parakeet_device = os.getenv("PARAKEET_DEVICE", "cuda")
+
+    try:
+        from parakeet_engine import ParakeetSttEngine
+
+        engine = ParakeetSttEngine(device=parakeet_device)
+        stt_registry.register(engine)
+        print(f"[demo] Registered Parakeet v2 STT engine (device={parakeet_device})")
+    except ImportError as e:
+        print(f"[demo] Parakeet v2 not available: {e}")
+        print(
+            "[demo] Install dependencies: pip install nemo_toolkit['asr'] torch torchaudio soundfile silero-vad"
+        )
+    except Exception as e:
+        print(f"[demo] Failed to register Parakeet v2: {e}")
 
 
 def create_app() -> FastAPI:
@@ -35,7 +79,19 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    runtime = create_server()
+    # Build runtime dependencies
+    deps = build_runtime_dependencies()
+
+    # Uncomment below to enable Parakeet v2 STT:
+    # _register_parakeet_stt(deps.stt_registry)
+    # from open_voice_runtime.app.catalog import build_engine_catalog
+    # deps.engine_catalog = build_engine_catalog(...)
+
+    # Create server
+    from open_voice_runtime.app.server import RuntimeServer
+
+    runtime = RuntimeServer(dependencies=deps)
+
     install_http_routes(app, runtime)
     install_realtime_route(app, runtime)
 

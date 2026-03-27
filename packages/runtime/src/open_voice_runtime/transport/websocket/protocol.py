@@ -57,6 +57,7 @@ class AudioAppendMessage:
 class AudioCommitMessage:
     session_id: str
     sequence: int | None = None
+    client_turn_id: str | None = None
     type: ClientMessageType = ClientMessageType.AUDIO_COMMIT
 
 
@@ -64,6 +65,7 @@ class AudioCommitMessage:
 class UserTurnCommitMessage:
     session_id: str
     sequence: int | None = None
+    client_turn_id: str | None = None
     type: ClientMessageType = ClientMessageType.USER_TURN_COMMIT
 
 

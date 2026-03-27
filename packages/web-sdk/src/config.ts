@@ -15,12 +15,24 @@ export interface RouteTargetConfig {
 export interface RuntimeSessionConfig {
   defaultLlmEngineId?: string
   routeTargets?: RouteTargetConfig[]
+  router?: RouterConfig
   llm?: LlmSessionConfig
   turnQueue?: TurnQueueConfig
   interruption?: InterruptionConfig
   endpointing?: EndPointingConfig
   turnDetection?: Record<string, unknown>
+  retry?: RetryConfig
   raw?: Record<string, unknown>
+}
+
+export interface RetryConfig {
+  enabled?: boolean
+  afterMs?: number
+}
+
+export interface RouterConfig {
+  timeoutMs?: number
+  mode?: "disabled" | "fallback_only" | "enabled"
 }
 
 export interface TurnQueueConfig {
@@ -70,6 +82,12 @@ export function toRuntimeConfigPayload(
   if (config.routeTargets !== undefined) {
     payload.route_targets = config.routeTargets.map(toRouteTargetPayload)
   }
+  if (config.router !== undefined) {
+    const routerPayload: Record<string, unknown> = {}
+    if (config.router.timeoutMs !== undefined) routerPayload.timeout_ms = config.router.timeoutMs
+    if (config.router.mode !== undefined) routerPayload.mode = config.router.mode
+    payload.router = routerPayload
+  }
   if (config.llm !== undefined) {
     payload.llm = toLlmConfigPayload(config.llm)
   }
@@ -79,11 +97,20 @@ export function toRuntimeConfigPayload(
   if (config.interruption !== undefined) {
     payload.interruption = toInterruptionPayload(config.interruption)
   }
+  if (config.endpointing !== undefined) {
+    payload.endpointing = toEndPointingPayload(config.endpointing)
+  }
   if (config.endPointing !== undefined) {
     payload.endpointing = toEndPointingPayload(config.endPointing)
   }
   if (config.turnDetection !== undefined) {
     payload.turn_detection = config.turnDetection
+  }
+  if (config.retry !== undefined) {
+    const retryPayload: Record<string, unknown> = {}
+    if (config.retry.enabled !== undefined) retryPayload.enabled = config.retry.enabled
+    if (config.retry.afterMs !== undefined) retryPayload.after_ms = config.retry.afterMs
+    payload.retry = retryPayload
   }
   if (config.raw !== undefined) {
     Object.assign(payload, config.raw)

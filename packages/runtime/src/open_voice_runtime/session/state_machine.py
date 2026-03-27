@@ -21,6 +21,7 @@ ALLOWED_SESSION_TRANSITIONS: Mapping[SessionStatus, frozenset[SessionStatus]] = 
     SessionStatus.READY: frozenset(
         {
             SessionStatus.LISTENING,
+            SessionStatus.TRANSCRIBING,
             SessionStatus.THINKING,
             SessionStatus.CLOSED,
             SessionStatus.FAILED,
@@ -28,6 +29,16 @@ ALLOWED_SESSION_TRANSITIONS: Mapping[SessionStatus, frozenset[SessionStatus]] = 
     ),
     SessionStatus.LISTENING: frozenset(
         {
+            SessionStatus.TRANSCRIBING,
+            SessionStatus.THINKING,
+            SessionStatus.INTERRUPTED,
+            SessionStatus.CLOSED,
+            SessionStatus.FAILED,
+        }
+    ),
+    SessionStatus.TRANSCRIBING: frozenset(
+        {
+            SessionStatus.LISTENING,
             SessionStatus.THINKING,
             SessionStatus.INTERRUPTED,
             SessionStatus.CLOSED,

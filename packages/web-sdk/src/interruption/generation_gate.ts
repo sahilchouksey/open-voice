@@ -21,9 +21,18 @@ const GENERATION_START_EVENT_TYPES = new Set<string>([
   "tts.chunk",
 ])
 
+const RESUME_FROM_TTS_SUPPRESSION_EVENT_TYPES = new Set<string>([
+  "stt.final",
+  "llm.phase",
+  "llm.reasoning.delta",
+  "llm.response.delta",
+  "llm.tool.update",
+])
+
 export class GenerationEventGate {
   private activeGenerationId: string | null = null
   private readonly rejectedGenerationIds = new Set<string>()
+  private suppressTtsUntilNextGenerationStart = false
 
   constructor(private readonly maxRejected = 32) {}
 
@@ -32,6 +41,13 @@ export class GenerationEventGate {
   }
 
   shouldAccept(event: ConversationEvent): boolean {
+    if (
+      this.suppressTtsUntilNextGenerationStart
+      && (event.type === "tts.chunk" || event.type === "tts.completed")
+    ) {
+      return false
+    }
+
     const generationId = event.generation_id ?? null
     if (!generationId) return true
 
@@ -67,6 +83,13 @@ export class GenerationEventGate {
       return
     }
 
+    if (
+      this.suppressTtsUntilNextGenerationStart
+      && RESUME_FROM_TTS_SUPPRESSION_EVENT_TYPES.has(event.type)
+    ) {
+      this.suppressTtsUntilNextGenerationStart = false
+    }
+
     const generationId = event.generation_id ?? null
     if (!generationId) {
       return
@@ -98,6 +121,7 @@ export class GenerationEventGate {
   }
 
   rejectActiveGeneration(): void {
+    this.suppressTtsUntilNextGenerationStart = true
     if (!this.activeGenerationId) {
       return
     }
@@ -107,6 +131,7 @@ export class GenerationEventGate {
   reset(): void {
     this.activeGenerationId = null
     this.rejectedGenerationIds.clear()
+    this.suppressTtsUntilNextGenerationStart = false
   }
 
   private rememberRejected(generationId: string): void {

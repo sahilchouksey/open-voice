@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="112" viewBox="136 28 236 74" aria-hidden="true">
+  <style>
+    .logo line {
+      stroke: #fff;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: miter;
+    }
+    .logo text {
+      white-space: pre;
+      fill: #fff;
+      font-family: Iosevka Fixed, monospace;
+      font-size: 14px;
+    }
+  </style>
+  <g class="logo">
+    <text x="194" y="92">O</text>
+    <text x="210" y="92">P</text>
+    <text x="226" y="92">E</text>
+    <text x="242" y="92">N</text>
+    <text x="274" y="92">V</text>
+    <text x="290" y="92">O</text>
+    <text x="306" y="92">I</text>
+    <text x="322" y="92">C</text>
+    <text x="338" y="92">E</text>
+    <line x1="172" y1="40" x2="188" y2="40" />
+    <line x1="172" y1="40" x2="172" y2="72" />
+    <line x1="188" y1="40" x2="188" y2="72" />
+    <line x1="144" y1="72" x2="172" y2="72" />
+    <line x1="236" y1="40" x2="268" y2="40" />
+    <line x1="236" y1="40" x2="236" y2="72" />
+    <line x1="268" y1="40" x2="268" y2="72" />
+    <line x1="204" y1="56" x2="220" y2="56" />
+    <line x1="204" y1="56" x2="204" y2="72" />
+    <line x1="220" y1="56" x2="220" y2="72" />
+    <line x1="188" y1="72" x2="204" y2="72" />
+    <line x1="220" y1="72" x2="236" y2="72" />
+    <line x1="316" y1="40" x2="332" y2="40" />
+    <line x1="316" y1="40" x2="316" y2="72" />
+    <line x1="332" y1="40" x2="332" y2="72" />
+    <line x1="332" y1="72" x2="360" y2="72" />
+    <line x1="284" y1="56" x2="300" y2="56" />
+    <line x1="284" y1="56" x2="284" y2="72" />
+    <line x1="300" y1="56" x2="300" y2="72" />
+    <line x1="268" y1="72" x2="284" y2="72" />
+    <line x1="300" y1="72" x2="316" y2="72" />
+  </g>
+</svg>

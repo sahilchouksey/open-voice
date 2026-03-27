@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import importlib
 from dataclasses import dataclass
+import os
 from typing import Any
 
 from open_voice_runtime.core.errors import ErrorCode, OpenVoiceError
@@ -16,12 +17,14 @@ def moonshine_voice_available() -> bool:
 class MoonshineConfig:
     language: str = "en"
     model_arch: str = "MEDIUM_STREAMING"
-    update_interval: float = 0.25
+    update_interval: float = 0.03
 
 
 class MoonshineVoiceClient:
     def __init__(self, config: MoonshineConfig | None = None) -> None:
-        self._config = config or MoonshineConfig()
+        self._config = config or MoonshineConfig(
+            update_interval=_moonshine_update_interval_seconds()
+        )
 
     def create_transcriber(self, *, language: str | None = None):
         moonshine = self._module()
@@ -68,3 +71,15 @@ class MoonshineVoiceClient:
 
     def _transcriber_module(self) -> Any:
         return importlib.import_module("moonshine_voice.transcriber")
+
+
+def _moonshine_update_interval_seconds() -> float:
+    raw = os.getenv("OPEN_VOICE_MOONSHINE_UPDATE_INTERVAL_MS")
+    if raw is None:
+        return 0.03
+    try:
+        value_ms = float(raw)
+    except (TypeError, ValueError):
+        return 0.03
+    value_ms = max(10.0, min(120.0, value_ms))
+    return value_ms / 1000.0

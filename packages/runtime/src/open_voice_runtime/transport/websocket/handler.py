@@ -48,6 +48,20 @@ def _log_payload_snapshot(payload: dict[str, Any]) -> str:
                 "type": event_type,
                 "turn_id": payload.get("turn_id"),
                 "text": payload.get("text"),
+                "revision": payload.get("revision"),
+                "finality": payload.get("finality"),
+                "deferred": payload.get("deferred"),
+            },
+            ensure_ascii=True,
+        )
+    if event_type == "stt.status":
+        return json.dumps(
+            {
+                "type": event_type,
+                "turn_id": payload.get("turn_id"),
+                "status": payload.get("status"),
+                "waited_ms": payload.get("waited_ms"),
+                "attempt": payload.get("attempt"),
             },
             ensure_ascii=True,
         )

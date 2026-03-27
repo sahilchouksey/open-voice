@@ -3,6 +3,7 @@ export type SessionStatus =
   | "loading"
   | "ready"
   | "listening"
+  | "transcribing"
   | "thinking"
   | "speaking"
   | "interrupted"
@@ -92,13 +93,27 @@ export interface EndPointingPayload {
 export interface RuntimeConfigPayload {
   default_llm_engine_id?: string
   route_targets?: RouteTargetPayload[]
+  router?: {
+    timeout_ms?: number
+    mode?: string
+    [key: string]: unknown
+  }
   llm?: LlmConfigPayload
   turn_queue?: {
     policy?: "send_now" | "enqueue" | "inject_next_loop"
   }
   interruption?: InterruptionPayload
   endpointing?: EndPointingPayload
-  turn_detection?: Record<string, unknown>
+  turn_detection?: {
+    mode?: string
+    transcript_timeout_ms?: number
+    stabilization_ms?: number
+    min_silence_duration_ms?: number
+    min_speech_duration_ms?: number
+    activation_threshold?: number
+    vad_chunk_size?: number
+    [key: string]: unknown
+  }
   [key: string]: unknown
 }
 
@@ -120,12 +135,14 @@ export interface AudioCommitMessage {
   type: "audio.commit"
   session_id: string
   sequence?: number
+  client_turn_id?: string
 }
 
 export interface UserTurnCommitMessage {
   type: "user_turn.commit"
   session_id: string
   sequence?: number
+  client_turn_id?: string
 }
 
 export interface AgentSayMessage {
@@ -223,6 +240,17 @@ export interface SttFinalEvent extends BaseConversationEvent {
   type: "stt.final"
   text: string
   confidence?: number | null
+  revision?: number | null
+  finality?: "stable" | "revised" | "duplicate" | null
+  deferred?: boolean | null
+  previous_text?: string | null
+}
+
+export interface SttStatusEvent extends BaseConversationEvent {
+  type: "stt.status"
+  status: "queued" | "transcribing" | "stabilizing" | "waiting_final" | "retry_scheduled"
+  waited_ms?: number | null
+  attempt?: number | null
 }
 
 export interface RouteSelectedEvent extends BaseConversationEvent {
@@ -298,6 +326,16 @@ export interface LlmCompletedEvent extends BaseConversationEvent {
   model?: string | null
 }
 
+export interface LlmErrorEvent extends BaseConversationEvent {
+  type: "llm.error"
+  error: {
+    code: string
+    message: string
+    retryable: boolean
+    details?: Record<string, unknown>
+  }
+}
+
 export interface TtsChunkEvent extends BaseConversationEvent {
   type: "tts.chunk"
   chunk: Record<string, unknown>
@@ -312,6 +350,11 @@ export interface TtsCompletedEvent extends BaseConversationEvent {
 export interface ConversationInterruptedEvent extends BaseConversationEvent {
   type: "conversation.interrupted"
   reason?: string | null
+}
+
+export interface TurnAcceptedEvent extends BaseConversationEvent {
+  type: "turn.accepted"
+  client_turn_id: string
 }
 
 export interface TurnQueuedEvent extends BaseConversationEvent {
@@ -354,6 +397,7 @@ export type ConversationEvent =
   | VadStateEvent
   | SttPartialEvent
   | SttFinalEvent
+  | SttStatusEvent
   | RouteSelectedEvent
   | LlmPhaseEvent
   | LlmReasoningDeltaEvent
@@ -362,9 +406,11 @@ export type ConversationEvent =
   | LlmUsageEvent
   | LlmSummaryEvent
   | LlmCompletedEvent
+  | LlmErrorEvent
   | TtsChunkEvent
   | TtsCompletedEvent
   | ConversationInterruptedEvent
+  | TurnAcceptedEvent
   | TurnQueuedEvent
   | TurnMetricsEvent
   | ErrorEvent

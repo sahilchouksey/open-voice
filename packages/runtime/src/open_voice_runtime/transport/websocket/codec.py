@@ -55,12 +55,14 @@ def parse_client_message(payload: dict[str, Any]) -> ClientMessage:
         return AudioCommitMessage(
             session_id=_require_str(payload, "session_id"),
             sequence=_as_optional_int(payload.get("sequence")),
+            client_turn_id=_as_optional_str(payload.get("client_turn_id")),
         )
 
     if kind is ClientMessageType.USER_TURN_COMMIT:
         return UserTurnCommitMessage(
             session_id=_require_str(payload, "session_id"),
             sequence=_as_optional_int(payload.get("sequence")),
+            client_turn_id=_as_optional_str(payload.get("client_turn_id")),
         )
 
     if kind is ClientMessageType.AGENT_SAY:

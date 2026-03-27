@@ -82,19 +82,21 @@ export class WebVoiceSession {
     })
   }
 
-  commit(sequence?: number): void {
+  commit(sequence?: number, clientTurnId?: string): void {
     this.socket.send({
       type: "audio.commit",
       session_id: this.sessionId,
       sequence,
+      client_turn_id: clientTurnId,
     })
   }
 
-  commitUserTurn(sequence?: number): void {
+  commitUserTurn(sequence?: number, clientTurnId?: string): void {
     const message: UserTurnCommitMessage = {
       type: "user_turn.commit",
       session_id: this.sessionId,
       sequence,
+      client_turn_id: clientTurnId,
     }
     this.socket.send(message)
   }

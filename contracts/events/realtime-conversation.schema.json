@@ -10,6 +10,7 @@
     { "$ref": "#/$defs/sessionStatusEvent" },
     { "$ref": "#/$defs/vadStateEvent" },
     { "$ref": "#/$defs/sttPartialEvent" },
+    { "$ref": "#/$defs/sttStatusEvent" },
     { "$ref": "#/$defs/sttFinalEvent" },
     { "$ref": "#/$defs/routeSelectedEvent" },
     { "$ref": "#/$defs/llmPhaseEvent" },
@@ -22,6 +23,7 @@
     { "$ref": "#/$defs/ttsChunkEvent" },
     { "$ref": "#/$defs/ttsCompletedEvent" },
     { "$ref": "#/$defs/conversationInterruptedEvent" },
+    { "$ref": "#/$defs/turnAcceptedEvent" },
     { "$ref": "#/$defs/turnQueuedEvent" },
     { "$ref": "#/$defs/turnMetricsEvent" },
     { "$ref": "#/$defs/errorEvent" },
@@ -84,7 +86,7 @@
             "type": { "const": "session.status" },
             "status": {
               "type": "string",
-              "enum": ["created", "loading", "ready", "listening", "thinking", "speaking", "interrupted", "closed", "failed"]
+              "enum": ["created", "loading", "ready", "listening", "transcribing", "thinking", "speaking", "interrupted", "closed", "failed"]
             },
             "reason": { "type": ["string", "null"] }
           },
@@ -130,9 +132,30 @@
           "properties": {
             "type": { "const": "stt.final" },
             "text": { "type": "string" },
-            "confidence": { "type": ["number", "null"] }
+            "confidence": { "type": ["number", "null"] },
+            "revision": { "type": ["integer", "null"], "minimum": 1 },
+            "finality": { "type": ["string", "null"], "enum": ["stable", "revised", "duplicate", null] },
+            "deferred": { "type": ["boolean", "null"] },
+            "previous_text": { "type": ["string", "null"] }
           },
           "required": ["text"]
+        }
+      ]
+    },
+    "sttStatusEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "stt.status" },
+            "status": {
+              "type": "string",
+              "enum": ["queued", "transcribing", "stabilizing", "waiting_final", "retry_scheduled"]
+            },
+            "waited_ms": { "type": ["integer", "null"], "minimum": 0 },
+            "attempt": { "type": ["integer", "null"], "minimum": 1 }
+          },
+          "required": ["status"]
         }
       ]
     },
@@ -298,6 +321,18 @@
             "type": { "const": "conversation.interrupted" },
             "reason": { "type": ["string", "null"] }
           }
+        }
+      ]
+    },
+    "turnAcceptedEvent": {
+      "allOf": [
+        { "$ref": "#/$defs/baseEvent" },
+        {
+          "properties": {
+            "type": { "const": "turn.accepted" },
+            "client_turn_id": { "type": "string" }
+          },
+          "required": ["client_turn_id"]
         }
       ]
     },

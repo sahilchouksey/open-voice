@@ -31,6 +31,12 @@ web client SDK in `packages/web-sdk`.
   - `send_now`: interrupt current generation immediately and process new turn now
   - `inject_next_loop`: currently normalized to `enqueue`
 - Runtime emits `turn.queued` and `turn.metrics` events to support queue visibility and latency instrumentation.
+- Runtime supports commit correlation and STT progress telemetry:
+  - client may send `client_turn_id` on `audio.commit` / `user_turn.commit`
+  - runtime emits `turn.accepted` with `client_turn_id` and resolved `turn_id`
+  - runtime emits `stt.status` (`queued`, `transcribing`, `waiting_final`, `stabilizing`, `retry_scheduled`)
+  - runtime emits `stt.final` revision metadata (`revision`, `finality`, `deferred`, `previous_text`)
+  - optional retry config: `runtime_config.retry.enabled`, `runtime_config.retry.after_ms`
 
 For local adapter testing, the ASGI app factory lives at:
 

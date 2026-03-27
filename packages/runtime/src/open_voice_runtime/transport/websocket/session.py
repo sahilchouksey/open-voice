@@ -14,6 +14,7 @@ from open_voice_runtime.conversation.events import (
     ConversationInterruptedEvent,
     ErrorEvent,
     LlmCompletedEvent,
+    LlmErrorEvent,
     LlmPhaseEvent,
     LlmReasoningDeltaEvent,
     LlmResponseDeltaEvent,
@@ -27,6 +28,8 @@ from open_voice_runtime.conversation.events import (
     SessionStatusEvent,
     SttFinalEvent,
     SttPartialEvent,
+    SttStatusEvent,
+    TurnAcceptedEvent,
     TurnMetricsEvent,
     TurnQueuedEvent,
     TtsChunkEvent,
@@ -39,6 +42,7 @@ from open_voice_runtime.llm.contracts import (
     LlmEventKind,
     LlmMessage,
     LlmOutputLane,
+    LlmPhase,
     LlmRequest,
     LlmRole,
 )
@@ -95,6 +99,23 @@ TOOL_SPEECH_DEDUP_WINDOW_SECONDS = 6.0
 TURN_QUEUE_POLICY_SEND_NOW = "send_now"
 TURN_QUEUE_POLICY_ENQUEUE = "enqueue"
 TURN_QUEUE_POLICY_INJECT_NEXT_LOOP = "inject_next_loop"
+
+
+DEFAULT_STT_FINAL_TIMEOUT_MS = 2200
+DEFAULT_LLM_FIRST_DELTA_TIMEOUT_MS = 30000
+DEFAULT_LLM_TOTAL_TIMEOUT_MS = 25000
+DEFAULT_STT_STABILIZATION_MS = 0
+LLM_RAW_ERROR_PREFIX = "I hit an error: "
+LLM_RAW_ERROR_MAX_CHARS = 220
+
+
+def _truncate_error_for_speech(message: str) -> str:
+    message = (message or "").strip()
+    if not message:
+        return "unknown error"
+    if len(message) <= LLM_RAW_ERROR_MAX_CHARS:
+        return message
+    return message[:LLM_RAW_ERROR_MAX_CHARS].rstrip() + "..."
 
 
 @dataclass(slots=True)
@@ -169,12 +190,25 @@ class RealtimeConversationSession:
         self._last_stt_final_at: dict[
             str, float
         ] = {}  # session_id -> timestamp of last stt.final event
+        self._last_stt_final_text: dict[
+            str, str
+        ] = {}  # session_id -> most recent stt.final text snapshot
+        self._stt_commit_started_at: dict[
+            str, float
+        ] = {}  # session_id -> monotonic timestamp of current commit start
         self._last_user_activity_at: dict[
             str, float
         ] = {}  # session_id -> most recent speech/STT activity
+        self._barge_in_speech_started_at: dict[
+            str, float
+        ] = {}  # session_id -> monotonic timestamp of sustained barge-in speech detection
         self._turn_entered_processing_at: dict[
             str, float
         ] = {}  # session_id -> timestamp when turn entered THINKING/PROCESSING
+        self._stt_final_revisions: dict[str, int] = {}
+        self._last_stt_final_text_emitted: dict[str, str] = {}
+        self._last_stt_final_turn_id_emitted: dict[str, str] = {}
+        self._client_turn_attempts: dict[str, dict[str, int]] = {}
         self._tool_speech_announcements: dict[
             str, dict[tuple[str, str], float]
         ] = {}  # session_id -> {(call_id,status): announced_at}
@@ -330,11 +364,21 @@ class RealtimeConversationSession:
             # CRITICAL FIX: Don't allow interrupts during post-interrupt collecting mode
             # When user speaks continuously after an interrupt, we're collecting their speech
             # and waiting for VAD end. We should NOT interrupt the new turn during this time.
-            if self._post_interrupt_collecting.get(state.session_id, False):
+            if (
+                self._post_interrupt_collecting.get(state.session_id, False)
+                and policy != TURN_QUEUE_POLICY_SEND_NOW
+            ):
                 logger.debug(
                     "Skipping interruption - in post-interrupt collecting mode session=%s",
                     state.session_id,
                 )
+                return status_events
+
+            if state.status is SessionStatus.TRANSCRIBING:
+                if policy == TURN_QUEUE_POLICY_SEND_NOW:
+                    latest_final_text = self._turns.buffered_final_text(message.session_id)
+                    if latest_final_text:
+                        self._turns.seed_final_text(message.session_id, latest_final_text)
                 return status_events
 
             # Don't allow interrupting a turn that was created after an interrupt
@@ -346,7 +390,11 @@ class RealtimeConversationSession:
                 current_time = asyncio.get_running_loop().time()
                 time_since_created = current_time - post_interrupt_time
                 # Block interruption if this is the post-interrupt turn AND it was created recently
-                if state.active_turn_id == post_interrupt_turn and time_since_created < 5.0:
+                if (
+                    state.active_turn_id == post_interrupt_turn
+                    and time_since_created < 5.0
+                    and policy != TURN_QUEUE_POLICY_SEND_NOW
+                ):
                     logger.debug(
                         "Skipping interruption - turn was created after previous interrupt "
                         "session=%s turn=%s age=%.2fs",
@@ -378,22 +426,51 @@ class RealtimeConversationSession:
             # The previous 0.85 threshold during THINKING was too high and missed speech
             # User should be able to interrupt the LLM by speaking at any time
             min_probability = 0.5
-            has_speech = _contains_vad_speech(
+            speech_detected = _contains_vad_speech(
                 pre_commit_vad_events, min_probability=min_probability
             )
-            if strict_speaking_barge_in and not _contains_vad_barge_in_start(pre_commit_vad_events):
-                has_speech = False
-            if vad_stream is None:
-                has_speech = True
-            if not has_speech:
-                return status_events
 
-            if policy != TURN_QUEUE_POLICY_ENQUEUE and not recent_send_now_interrupt:
+            # In strict barge-in mode, require explicit START_OF_SPEECH only when
+            # no sustained-speech guard is configured.
+            min_duration_seconds = max(0.0, float(interrupt_cfg.get("min_duration", 0.0)))
+            require_explicit_barge_start = strict_speaking_barge_in and min_duration_seconds <= 0.0
+            if require_explicit_barge_start and not _contains_vad_barge_in_start(
+                pre_commit_vad_events
+            ):
+                speech_detected = False
+
+            if vad_stream is None:
+                speech_detected = True
+
+            has_speech = speech_detected
+            now = asyncio.get_running_loop().time()
+            if speech_detected and min_duration_seconds > 0.0 and vad_stream is not None:
+                first_detected_at = self._barge_in_speech_started_at.get(state.session_id)
+                if first_detected_at is None:
+                    self._barge_in_speech_started_at[state.session_id] = now
+                    has_speech = False
+                elif now - first_detected_at < min_duration_seconds:
+                    has_speech = False
+            elif not speech_detected:
+                self._barge_in_speech_started_at.pop(state.session_id, None)
+
+            if not has_speech and policy != TURN_QUEUE_POLICY_SEND_NOW:
+                return status_events
+            if not has_speech and policy == TURN_QUEUE_POLICY_SEND_NOW:
+                logger.debug(
+                    "Deferring send_now interrupt until sustained speech is detected "
+                    "session=%s min_duration=%.3fs",
+                    state.session_id,
+                    min_duration_seconds,
+                )
+
+            if has_speech and policy != TURN_QUEUE_POLICY_ENQUEUE and not recent_send_now_interrupt:
                 interrupt_reason = (
                     "send_now" if policy == TURN_QUEUE_POLICY_SEND_NOW else "barge_in"
                 )
                 if interrupt_reason == "send_now":
                     self._preempt_active_generation(state.session_id)
+                self._barge_in_speech_started_at.pop(state.session_id, None)
                 preserved_final_text = self._turns.buffered_final_text(message.session_id)
                 interrupt_events = await self._interrupt(
                     ConversationInterruptMessage(
@@ -433,7 +510,11 @@ class RealtimeConversationSession:
             state.begin_turn()
             self._turn_start_times[state.session_id] = asyncio.get_running_loop().time()
 
-        stt_events = await self._drain_stt_events(state.session_id, wait_seconds=0.1)
+        stt_wait_seconds = 0.0
+        stt_events = await self._drain_stt_events(
+            state.session_id,
+            wait_seconds=stt_wait_seconds,
+        )
         has_new_stt_final = any(
             event.kind is SttEventKind.FINAL and bool((event.text or "").strip())
             for event in stt_events
@@ -442,9 +523,15 @@ class RealtimeConversationSession:
         if stt_events:
             self._last_user_activity_at[state.session_id] = asyncio.get_running_loop().time()
 
-        # Track when stt.final occurs to prevent interrupts from late audio chunks
+            # Track when stt.final occurs to prevent interrupts from late audio chunks
         if has_new_stt_final:
-            self._last_stt_final_at[state.session_id] = asyncio.get_running_loop().time()
+            now = asyncio.get_running_loop().time()
+            self._last_stt_final_at[state.session_id] = now
+            latest_final_text = _final_text_from_stt_events(stt_events)
+            if latest_final_text:
+                previous_text = self._last_stt_final_text.get(state.session_id)
+                if previous_text != latest_final_text:
+                    self._last_stt_final_text[state.session_id] = latest_final_text
 
         if (
             has_new_stt_final
@@ -461,7 +548,7 @@ class RealtimeConversationSession:
                     - self._last_interrupt_at.get(state.session_id, 0)
                 )
                 min_words_cfg = max(0, int(interrupt_cfg.get("min_words", 0)))
-                rapid_window_min_words = max(2, min_words_cfg)
+                rapid_window_min_words = min_words_cfg if min_words_cfg > 0 else 2
                 recent_send_now_interrupt = (
                     policy == TURN_QUEUE_POLICY_SEND_NOW and time_since_interrupt < cooldown_seconds
                 )
@@ -470,15 +557,64 @@ class RealtimeConversationSession:
                 )
 
                 if recent_send_now_interrupt and short_follow_up:
-                    logger.debug(
-                        "Ignoring short follow-up STT final during send_now cooldown "
-                        "session=%s words=%s required=%s dt=%.3fs text=%r",
-                        state.session_id,
-                        _count_meaningful_words(latest_final_text),
-                        rapid_window_min_words,
-                        time_since_interrupt,
-                        latest_final_text,
+                    explicit_barge_start = _contains_vad_barge_in_start(pre_commit_vad_events or [])
+                    rapid_short_followups = bool(
+                        state.metadata.get("allow_rapid_short_followups", False)
                     )
+                    if explicit_barge_start and rapid_short_followups:
+                        fast_rebarge_window_seconds = max(0.3, min(1.0, cooldown_seconds * 0.6))
+                        if time_since_interrupt <= fast_rebarge_window_seconds:
+                            interrupt_reason = "send_now"
+                            self._preempt_active_generation(state.session_id)
+                            preserved_final_text = self._turns.buffered_final_text(
+                                message.session_id
+                            )
+                            interrupt_events = await self._interrupt(
+                                ConversationInterruptMessage(
+                                    session_id=message.session_id,
+                                    reason=interrupt_reason,
+                                )
+                            )
+                            status_events.extend(interrupt_events)
+                            self._turns.clear_buffer(message.session_id)
+                            if preserved_final_text:
+                                self._turns.seed_final_text(
+                                    message.session_id, preserved_final_text
+                                )
+                                seeded_final_segments_count = self._turns.final_segment_count(
+                                    message.session_id
+                                )
+                            if latest_final_text:
+                                self._turns.seed_final_text(message.session_id, latest_final_text)
+                            state = await self._sessions.get(message.session_id)
+                            pre_commit_vad_events = None
+                            interrupted_on_this_append = True
+                            logger.debug(
+                                "Allowed short follow-up interrupt due to explicit speech start "
+                                "session=%s dt=%.3fs text=%r",
+                                state.session_id,
+                                time_since_interrupt,
+                                latest_final_text,
+                            )
+                        else:
+                            logger.debug(
+                                "Short follow-up still blocked after fast rebarge window "
+                                "session=%s dt=%.3fs window=%.3fs text=%r",
+                                state.session_id,
+                                time_since_interrupt,
+                                fast_rebarge_window_seconds,
+                                latest_final_text,
+                            )
+                    else:
+                        logger.debug(
+                            "Ignoring short follow-up STT final during send_now cooldown "
+                            "session=%s words=%s required=%s dt=%.3fs text=%r",
+                            state.session_id,
+                            _count_meaningful_words(latest_final_text),
+                            rapid_window_min_words,
+                            time_since_interrupt,
+                            latest_final_text,
+                        )
                 else:
                     interrupt_reason = (
                         "send_now" if policy == TURN_QUEUE_POLICY_SEND_NOW else "barge_in"
@@ -576,8 +712,16 @@ class RealtimeConversationSession:
             # Check if VAD signaled end of speech. Some engines only emit
             # INFERENCE speaking=False instead of an explicit END_OF_SPEECH.
             vad_ended = _contains_vad_end_of_speech(vad_events)
+            now = asyncio.get_running_loop().time()
+            stt_idle_ready, stt_idle_seconds, stt_idle_threshold = _stt_idle_ready_for_commit(
+                state,
+                final_text=result.final_text,
+                last_stt_final_at=self._last_stt_final_at.get(state.session_id),
+                now=now,
+            )
+            force_commit_without_vad_end = stt_idle_ready
 
-            if not vad_ended:
+            if not vad_ended and not force_commit_without_vad_end:
                 # Don't auto-commit yet, wait for VAD end
                 logger.info(
                     "AUTO-COMMIT: Deferred - waiting for VAD end in post-interrupt mode",
@@ -586,6 +730,8 @@ class RealtimeConversationSession:
                         "turn_id": state.active_turn_id,
                         "final_text": result.final_text,
                         "vad_events_count": len(vad_events),
+                        "stt_idle_seconds": stt_idle_seconds,
+                        "stt_idle_threshold": stt_idle_threshold,
                     },
                 )
                 result = TurnRecognitionResult(
@@ -596,12 +742,17 @@ class RealtimeConversationSession:
             else:
                 # VAD ended - we can exit collecting mode and commit
                 logger.info(
-                    "AUTO-COMMIT: Proceeding - VAD ended in post-interrupt mode",
+                    "AUTO-COMMIT: Proceeding in post-interrupt mode",
                     extra={
                         "session_id": state.session_id,
                         "turn_id": state.active_turn_id,
                         "final_text": result.final_text,
                         "stt_events_count": len(stt_events),
+                        "commit_reason": (
+                            "stt_idle_fallback" if force_commit_without_vad_end else "vad_end"
+                        ),
+                        "stt_idle_seconds": stt_idle_seconds,
+                        "stt_idle_threshold": stt_idle_threshold,
                     },
                 )
                 self._post_interrupt_collecting.pop(state.session_id, None)
@@ -611,6 +762,9 @@ class RealtimeConversationSession:
             state.active_turn_id,
             stt_events,
             generation_id=self._response_generation_ids.get(state.session_id),
+            revision_store=self._stt_final_revisions,
+            previous_text_store=self._last_stt_final_text_emitted,
+            previous_turn_store=self._last_stt_final_turn_id_emitted,
         )
         vad_conversation_events = _conversation_events_from_vad(
             state.session_id,
@@ -638,8 +792,16 @@ class RealtimeConversationSession:
                 # Check if VAD has signaled end of speech. Some engines only emit
                 # INFERENCE speaking=False instead of an explicit END_OF_SPEECH.
                 vad_ended = _contains_vad_end_of_speech(vad_events)
+                now = asyncio.get_running_loop().time()
+                stt_idle_ready, stt_idle_seconds, stt_idle_threshold = _stt_idle_ready_for_commit(
+                    state,
+                    final_text=result.final_text,
+                    last_stt_final_at=self._last_stt_final_at.get(state.session_id),
+                    now=now,
+                )
+                force_commit_without_vad_end = stt_idle_ready
 
-                if not vad_ended:
+                if not vad_ended and not force_commit_without_vad_end:
                     # Don't auto-commit yet - user may still be speaking
                     # Wait for VAD to show END_OF_SPEECH before committing
                     logger.debug(
@@ -649,6 +811,8 @@ class RealtimeConversationSession:
                             "turn_id": state.active_turn_id,
                             "final_text": result.final_text[:100] if result.final_text else None,
                             "vad_events_count": len(vad_events),
+                            "stt_idle_seconds": stt_idle_seconds,
+                            "stt_idle_threshold": stt_idle_threshold,
                         },
                     )
                     result = TurnRecognitionResult(
@@ -658,11 +822,16 @@ class RealtimeConversationSession:
                     )
                 else:
                     logger.debug(
-                        "AUTO-COMMIT: Proceeding - VAD end_of_speech detected",
+                        "AUTO-COMMIT: Proceeding",
                         extra={
                             "session_id": state.session_id,
                             "turn_id": state.active_turn_id,
                             "final_text": result.final_text[:100] if result.final_text else None,
+                            "commit_reason": (
+                                "stt_idle_fallback" if force_commit_without_vad_end else "vad_end"
+                            ),
+                            "stt_idle_seconds": stt_idle_seconds,
+                            "stt_idle_threshold": stt_idle_threshold,
                         },
                     )
 
@@ -709,7 +878,11 @@ class RealtimeConversationSession:
         emit: ConversationEventEmitter | None = None,
     ) -> list[ConversationEvent]:
         return await self._commit_audio(
-            AudioCommitMessage(session_id=message.session_id, sequence=message.sequence),
+            AudioCommitMessage(
+                session_id=message.session_id,
+                sequence=message.sequence,
+                client_turn_id=message.client_turn_id,
+            ),
             emit=emit,
         )
 
@@ -720,6 +893,29 @@ class RealtimeConversationSession:
         emit: ConversationEventEmitter | None = None,
     ) -> list[ConversationEvent]:
         state = await self._sessions.get(message.session_id)
+        retry_enabled = False
+        retry_after_ms = 0
+        client_turn_id = _safe_str(message.client_turn_id)
+        retry_attempt = 0
+        if client_turn_id is not None:
+            runtime_config = state.metadata.get("runtime_config", {})
+            if isinstance(runtime_config, dict):
+                retry_cfg = runtime_config.get("retry")
+                if isinstance(retry_cfg, dict):
+                    retry_enabled = bool(retry_cfg.get("enabled", False))
+                    retry_after_ms = max(0, _safe_int(retry_cfg.get("after_ms"), 0))
+            retry_attempt = self._increment_client_turn_attempt(state.session_id, client_turn_id)
+            if retry_attempt > 1:
+                logger.info(
+                    "Skipping duplicate commit retry session=%s client_turn_id=%s attempt=%s",
+                    state.session_id,
+                    client_turn_id,
+                    retry_attempt,
+                )
+                return []
+
+        send_now_policy = _turn_queue_policy(state) == TURN_QUEUE_POLICY_SEND_NOW
+
         buffer = self._turns.buffer_for(state.session_id)
         logger.info(
             "Commit audio session=%s buffered_chunks=%s stt=%s router=%s status=%s",
@@ -729,7 +925,9 @@ class RealtimeConversationSession:
             state.engine_selection.router,
             state.status.value,
         )
-        if not buffer.chunks:
+        buffered_final_text = self._turns.buffered_final_text(state.session_id)
+        has_buffered_final_text = bool(buffered_final_text and buffered_final_text.strip())
+        if not buffer.chunks and not has_buffered_final_text:
             return []
 
         if state.active_turn_id is None:
@@ -776,17 +974,94 @@ class RealtimeConversationSession:
                         turn_id,
                     )
 
+        accepted_events: list[ConversationEvent] = []
+        if message.client_turn_id:
+            accepted_events.append(
+                TurnAcceptedEvent(
+                    state.session_id,
+                    message.client_turn_id,
+                    turn_id=turn_id,
+                )
+            )
+            accepted_events.extend(
+                self._stt_status_events(
+                    state.session_id,
+                    turn_id,
+                    "queued",
+                    waited_ms=0,
+                    attempt=retry_attempt if retry_attempt > 0 else 1,
+                    generation_id=self._response_generation_ids.get(state.session_id),
+                )
+            )
+
+        if accepted_events:
+            _set_generation_for_events(
+                accepted_events,
+                self._response_generation_ids.get(state.session_id),
+            )
+
+        emit_accepted_events = bool(emit is not None and accepted_events and message.client_turn_id)
+        if emit_accepted_events:
+            await _emit_conversation_events(emit, accepted_events)
+
         stream = await self._ensure_stt_stream(state)
         if stream is not None:
+            self._stt_commit_started_at[state.session_id] = asyncio.get_running_loop().time()
+            commit_wait_seconds = (
+                0.2 if has_buffered_final_text else _stt_final_timeout_seconds(state)
+            )
+            stabilization_seconds = 0.0 if send_now_policy else _stt_stabilization_seconds(state)
+            transcribing_status_events: list[ConversationEvent] = []
+            transcribing_status_events.extend(
+                self._stt_status_events(
+                    state.session_id,
+                    turn_id,
+                    "transcribing",
+                    waited_ms=0,
+                    generation_id=self._response_generation_ids.get(state.session_id),
+                )
+            )
+            if stabilization_seconds > 0.0:
+                transcribing_status_events.extend(
+                    await self._transition_session(
+                        state,
+                        SessionStatus.TRANSCRIBING,
+                        "stt.commit.waiting_final",
+                    )
+                )
+                transcribing_status_events.extend(
+                    self._stt_status_events(
+                        state.session_id,
+                        turn_id,
+                        "waiting_final",
+                        waited_ms=0,
+                        generation_id=self._response_generation_ids.get(state.session_id),
+                    )
+                )
             await stream.flush()
+            wait_started_at = asyncio.get_running_loop().time()
             result = await self._turns.collect_commit_result(
                 state.session_id,
                 lambda wait_seconds: self._drain_stt_events(
                     state.session_id, wait_seconds=wait_seconds
                 ),
-                timeout_seconds=2.0,
+                timeout_seconds=commit_wait_seconds,
+                stabilization_seconds=stabilization_seconds,
             )
             stt_events = result.stt_events
+            wait_elapsed_ms = int(
+                max(0.0, asyncio.get_running_loop().time() - wait_started_at) * 1000
+            )
+            if stabilization_seconds > 0.0:
+                transcribing_status_events.extend(
+                    self._stt_status_events(
+                        state.session_id,
+                        turn_id,
+                        "stabilizing",
+                        waited_ms=wait_elapsed_ms,
+                        generation_id=self._response_generation_ids.get(state.session_id),
+                    )
+                )
             logger.info(
                 "Drained STT commit events session=%s count=%s final_text=%s",
                 state.session_id,
@@ -796,12 +1071,70 @@ class RealtimeConversationSession:
             if stt_events:
                 self._last_user_activity_at[state.session_id] = asyncio.get_running_loop().time()
             if result.final_text is not None and result.final_text.strip():
+                now = asyncio.get_running_loop().time()
+                self._last_stt_final_at[state.session_id] = now
+                self._last_stt_final_text[state.session_id] = result.final_text
                 self._trace_mark_stt_final(state)
+
+            if (
+                emit is not None
+                and not has_buffered_final_text
+                and not (result.final_text and result.final_text.strip())
+                and not stt_events
+            ):
+                timeout_event = await self._emit_stt_timeout_feedback(
+                    state,
+                    turn_id,
+                    emit,
+                    details={
+                        "timeout_ms": int(commit_wait_seconds * 1000),
+                        "stage": "stt.commit",
+                        "stabilization_ms": int(stabilization_seconds * 1000),
+                    },
+                )
+
+                retry_event: list[ConversationEvent] = []
+                if retry_enabled and client_turn_id and retry_attempt == 1 and retry_after_ms > 0:
+                    retry_event = self._stt_status_events(
+                        state.session_id,
+                        turn_id,
+                        "retry_scheduled",
+                        waited_ms=retry_after_ms,
+                        attempt=retry_attempt + 1,
+                        generation_id=self._response_generation_ids.get(state.session_id),
+                    )
+                    if emit is not None:
+                        await _emit_conversation_events(emit, retry_event)
+                    await asyncio.sleep(retry_after_ms / 1000.0)
+                    if self._has_active_generation(state.session_id):
+                        return [] if emit is not None else [*accepted_events, *retry_event]
+                    return await self._commit_audio(
+                        AudioCommitMessage(
+                            session_id=message.session_id,
+                            sequence=message.sequence,
+                            client_turn_id=client_turn_id,
+                        ),
+                        emit=emit,
+                    )
+
+                self._turns.complete_turn(state.session_id)
+                if client_turn_id:
+                    self._clear_client_turn_attempt(state.session_id, client_turn_id)
+                await self._reset_stt_stream(state.session_id)
+                await self._reset_vad_stream(state.session_id)
+                self._stt_commit_started_at.pop(state.session_id, None)
+                if emit is None:
+                    return [*accepted_events, *retry_event, *timeout_event]
+                return []
+
             stt_conversation_events = _conversation_events_from_stt(
                 state.session_id,
                 turn_id,
                 stt_events,
                 generation_id=self._response_generation_ids.get(state.session_id),
+                revision_store=self._stt_final_revisions,
+                previous_text_store=self._last_stt_final_text_emitted,
+                previous_turn_store=self._last_stt_final_turn_id_emitted,
             )
             final_text = result.final_text
             pre_route_events: list[ConversationEvent] = []
@@ -814,6 +1147,7 @@ class RealtimeConversationSession:
                 and final_text
                 and state.status
                 in {
+                    SessionStatus.TRANSCRIBING,
                     SessionStatus.THINKING,
                     SessionStatus.SPEAKING,
                     SessionStatus.LOADING,
@@ -825,7 +1159,8 @@ class RealtimeConversationSession:
                 # and process the new input, not queue it.
                 # Queue policy should only apply during SPEAKING (TTS playback).
                 should_interrupt = (
-                    state.status is SessionStatus.THINKING or policy != TURN_QUEUE_POLICY_ENQUEUE
+                    state.status in {SessionStatus.TRANSCRIBING, SessionStatus.THINKING}
+                    or policy != TURN_QUEUE_POLICY_ENQUEUE
                 )
 
                 if should_interrupt:
@@ -833,7 +1168,11 @@ class RealtimeConversationSession:
                         "send_now"
                         if policy == TURN_QUEUE_POLICY_SEND_NOW
                         else "user_correction"
-                        if state.status is SessionStatus.THINKING
+                        if state.status
+                        in {
+                            SessionStatus.TRANSCRIBING,
+                            SessionStatus.THINKING,
+                        }
                         else "barge_in"
                     )
                     interrupt_events = await self._interrupt(
@@ -875,10 +1214,14 @@ class RealtimeConversationSession:
                 self._trace_start(state)
                 generation_id = self._new_generation_id()
                 self._response_generation_ids[state.session_id] = generation_id
+                _set_generation_for_events(accepted_events, generation_id)
                 _set_generation_for_events(stt_conversation_events, generation_id)
                 _set_generation_for_events(route_events, generation_id)
                 _set_generation_for_events(thinking_status_events, generation_id)
+                if not emit_accepted_events:
+                    await _emit_conversation_events(emit, accepted_events)
                 await _emit_conversation_events(emit, pre_route_events)
+                await _emit_conversation_events(emit, transcribing_status_events)
                 await _emit_conversation_events(emit, stt_conversation_events)
                 self._schedule_fast_ack_if_enabled(
                     state,
@@ -900,7 +1243,14 @@ class RealtimeConversationSession:
                 self._turns.complete_turn(state.session_id)
                 await self._reset_stt_stream(state.session_id)
                 await self._reset_vad_stream(state.session_id)
+                self._stt_commit_started_at.pop(state.session_id, None)
                 return []
+
+            if accepted_events:
+                _set_generation_for_events(
+                    accepted_events,
+                    self._response_generation_ids.get(state.session_id),
+                )
 
             llm_raw: list[LlmEvent]
             llm_events: list[ConversationEvent]
@@ -951,9 +1301,12 @@ class RealtimeConversationSession:
             # Reset streams for next turn
             await self._reset_stt_stream(state.session_id)
             await self._reset_vad_stream(state.session_id)
+            self._stt_commit_started_at.pop(state.session_id, None)
 
             return [
+                *accepted_events,
                 *pre_route_events,
+                *transcribing_status_events,
                 *stt_conversation_events,
                 *route_events,
                 *thinking_status_events,
@@ -963,25 +1316,35 @@ class RealtimeConversationSession:
             ]
 
         result = self._turns.fake_commit_result(state.session_id)
+        transcribing_status_events: list[ConversationEvent] = []
         stt_conversation_events = _conversation_events_from_stt(
             state.session_id,
             turn_id,
             result.stt_events,
             generation_id=self._response_generation_ids.get(state.session_id),
+            revision_store=self._stt_final_revisions,
+            previous_text_store=self._last_stt_final_text_emitted,
+            previous_turn_store=self._last_stt_final_turn_id_emitted,
         )
         pre_route_events: list[ConversationEvent] = []
 
         if (
             emit is not None
             and result.final_text
-            and state.status in {SessionStatus.THINKING, SessionStatus.SPEAKING}
+            and state.status
+            in {
+                SessionStatus.TRANSCRIBING,
+                SessionStatus.THINKING,
+                SessionStatus.SPEAKING,
+            }
         ):
             policy = _turn_queue_policy(state)
             # CRITICAL FIX: Always interrupt during THINKING state
             # When user corrects themselves while LLM is thinking, we must interrupt
             # and process the new input, not queue it.
             should_interrupt = (
-                state.status is SessionStatus.THINKING or policy != TURN_QUEUE_POLICY_ENQUEUE
+                state.status in {SessionStatus.TRANSCRIBING, SessionStatus.THINKING}
+                or policy != TURN_QUEUE_POLICY_ENQUEUE
             )
 
             if should_interrupt:
@@ -989,7 +1352,7 @@ class RealtimeConversationSession:
                     "send_now"
                     if policy == TURN_QUEUE_POLICY_SEND_NOW
                     else "user_correction"
-                    if state.status is SessionStatus.THINKING
+                    if state.status in {SessionStatus.TRANSCRIBING, SessionStatus.THINKING}
                     else "barge_in"
                 )
                 interrupt_events = await self._interrupt(
@@ -1022,14 +1385,24 @@ class RealtimeConversationSession:
             "llm.generating",
         )
 
+        if accepted_events:
+            _set_generation_for_events(
+                accepted_events,
+                self._response_generation_ids.get(state.session_id),
+            )
+
         if emit is not None:
             self._trace_start(state)
             generation_id = self._new_generation_id()
             self._response_generation_ids[state.session_id] = generation_id
+            _set_generation_for_events(accepted_events, generation_id)
             _set_generation_for_events(stt_conversation_events, generation_id)
             _set_generation_for_events(route_events, generation_id)
             _set_generation_for_events(thinking_status_events, generation_id)
+            if not emit_accepted_events:
+                await _emit_conversation_events(emit, accepted_events)
             await _emit_conversation_events(emit, pre_route_events)
+            await _emit_conversation_events(emit, transcribing_status_events)
             await _emit_conversation_events(emit, stt_conversation_events)
             self._schedule_fast_ack_if_enabled(
                 state,
@@ -1048,9 +1421,12 @@ class RealtimeConversationSession:
                 emit,
                 generation_id=generation_id,
             )
+            if client_turn_id:
+                self._clear_client_turn_attempt(state.session_id, client_turn_id)
             self._turns.complete_turn(state.session_id)
             await self._reset_stt_stream(state.session_id)
             await self._reset_vad_stream(state.session_id)
+            self._stt_commit_started_at.pop(state.session_id, None)
             return []
 
         llm_raw: list[LlmEvent]
@@ -1074,11 +1450,16 @@ class RealtimeConversationSession:
             "response.complete",
         )
         state.complete_turn(user_text=result.final_text, assistant_text=assistant_text)
+        if client_turn_id:
+            self._clear_client_turn_attempt(state.session_id, client_turn_id)
         self._turns.complete_turn(state.session_id)
         await self._reset_stt_stream(state.session_id)
         await self._reset_vad_stream(state.session_id)
+        self._stt_commit_started_at.pop(state.session_id, None)
         return [
+            *accepted_events,
             *pre_route_events,
+            *transcribing_status_events,
             *stt_conversation_events,
             *route_events,
             *thinking_status_events,
@@ -1136,13 +1517,18 @@ class RealtimeConversationSession:
         self._tool_search_start_announced.pop(state.session_id, None)
         self._tool_search_end_announced.pop(state.session_id, None)
 
-        await self._cancel_response_task(state.session_id)
+        cancel_timeout = 0.05 if runtime_preemption else 0.25
+        await self._cancel_response_task(state.session_id, await_timeout_s=cancel_timeout)
 
-        # Drain and discard any pending STT events to prevent them from becoming a new turn
-        drained_events = await self._drain_and_discard_stt_events(state.session_id)
-
-        await self._reset_stt_stream(state.session_id)
-        await self._reset_vad_stream(state.session_id)
+        if runtime_preemption:
+            # Keep the active STT stream for runtime barge-ins so pending
+            # interrupting speech can still finalize into the replacement turn.
+            await self._reset_vad_stream(state.session_id)
+        else:
+            # For manual interrupts, clear pending STT data to avoid stale turns.
+            await self._drain_and_discard_stt_events(state.session_id)
+            await self._reset_stt_stream(state.session_id)
+            await self._reset_vad_stream(state.session_id)
 
         status_events: list[ConversationEvent] = []
 
@@ -1168,31 +1554,40 @@ class RealtimeConversationSession:
         self._active_turn_traces.pop(state.session_id, None)
         self._turn_queue.pop(state.session_id, None)
         self._last_interrupt_at[state.session_id] = current_time
-        # Mark post-interrupt window - wait for VAD end before committing new turn
-        # Use longer window (3.0s) to prevent chain reaction during continuous speech
-        self._post_interrupt_until[state.session_id] = current_time + 3.0
+        # Mark short post-interrupt guard window to avoid stale-chunk thrash,
+        # but keep barge-in response realtime.
+        self._post_interrupt_until[state.session_id] = current_time + 0.25
 
         # Clear speech tracking after interrupt - will be set when speech starts
         self._speech_after_interrupt.pop(state.session_id, None)
         self._last_user_activity_at.pop(state.session_id, None)
+        self._barge_in_speech_started_at.pop(state.session_id, None)
 
         # Clear STT final tracking after interrupt - CRITICAL: prevents old STT final from blocking new turns
         self._last_stt_final_at.pop(state.session_id, None)
+        self._last_stt_final_text.pop(state.session_id, None)
+        self._stt_commit_started_at.pop(state.session_id, None)
+        self._stt_final_revisions.pop(state.session_id, None)
+        self._last_stt_final_text_emitted.pop(state.session_id, None)
+        self._last_stt_final_turn_id_emitted.pop(state.session_id, None)
+        self._client_turn_attempts.pop(state.session_id, None)
 
         # Clear processing tracking after interrupt
         self._turn_entered_processing_at.pop(state.session_id, None)
 
-        # Enter post-interrupt collecting mode
-        # This ensures we wait for VAD END_OF_SPEECH before committing new turns
-        # preventing chain reaction of interrupts during continuous speech
-        self._post_interrupt_collecting[state.session_id] = True
+        # Enter post-interrupt collecting mode only for non-send_now flows.
+        # send_now should stay near-instant and must not be held behind long VAD waits.
+        if _turn_queue_policy(state) != TURN_QUEUE_POLICY_SEND_NOW:
+            self._post_interrupt_collecting[state.session_id] = True
+        else:
+            self._post_interrupt_collecting.pop(state.session_id, None)
 
         logger.info(
             "INTERRUPTION COMPLETED - protection activated",
             extra={
                 **interrupt_context,
-                "post_interrupt_until": current_time + 3.0,
-                "protection_duration": 3.0,
+                "post_interrupt_until": current_time + 0.25,
+                "protection_duration": 0.25,
                 "status_transitioned": len(status_events) > 0,
             },
         )
@@ -1257,7 +1652,11 @@ class RealtimeConversationSession:
     ) -> list[ConversationEvent]:
         state = await self._sessions.get(message.session_id)
 
-        if state.status in {SessionStatus.THINKING, SessionStatus.SPEAKING}:
+        if state.status in {
+            SessionStatus.TRANSCRIBING,
+            SessionStatus.THINKING,
+            SessionStatus.SPEAKING,
+        }:
             queue_event = self._queue_turn(
                 state,
                 text=message.user_text,
@@ -1457,6 +1856,189 @@ class RealtimeConversationSession:
             if item.kind is TtsEventKind.COMPLETED:
                 return
 
+    async def _build_feedback_tts_events(
+        self,
+        state: SessionState,
+        turn_id: str | None,
+        *,
+        text: str,
+        reason: str,
+        generation_id: str | None = None,
+    ) -> list[ConversationEvent]:
+        if self._tts_service is None or not self._tts_service.is_available(
+            state.engine_selection.tts
+        ):
+            listening_only_events = await self._transition_session(
+                state,
+                SessionStatus.LISTENING,
+                f"{reason}.no_tts",
+            )
+            if not listening_only_events and state.status is SessionStatus.LISTENING:
+                listening_only_events = [
+                    SessionStatusEvent(
+                        state.session_id,
+                        SessionStatus.LISTENING,
+                        turn_id=state.active_turn_id,
+                        reason=f"{reason}.no_tts",
+                    )
+                ]
+            _set_generation_for_events(listening_only_events, generation_id)
+            return listening_only_events
+
+        engine_id = state.engine_selection.tts
+
+        request = TtsRequest(
+            session_id=state.session_id,
+            turn_id=turn_id or "",
+            text=text,
+            audio_format=_tts_audio_format(state),
+            voice_id=_tts_voice_id(state),
+            language=_session_language(state),
+            metadata={"text_segment": text},
+        )
+
+        try:
+            stream = await self._tts_service.stream(request, engine_id=engine_id)
+        except OpenVoiceError:
+            return []
+
+        events: list[ConversationEvent] = []
+        speaking_status_events = await self._transition_session(
+            state,
+            SessionStatus.SPEAKING,
+            reason,
+        )
+        _set_generation_for_events(speaking_status_events, generation_id)
+        events.extend(speaking_status_events)
+
+        total_duration_ms = 0.0
+        saw_duration = False
+        emitted_audio = False
+        async for item in stream:
+            if generation_id is not None and not self._is_active_generation(
+                state.session_id, generation_id
+            ):
+                return events
+            if item.kind is TtsEventKind.AUDIO_CHUNK and item.audio_chunk is not None:
+                tts_chunk_event = TtsChunkEvent(
+                    state.session_id,
+                    item.audio_chunk,
+                    turn_id=turn_id,
+                    text_segment=item.text_segment or text,
+                )
+                tts_chunk_event.generation_id = generation_id
+                events.append(tts_chunk_event)
+                emitted_audio = True
+                continue
+            if item.kind is TtsEventKind.COMPLETED and item.duration_ms is not None:
+                total_duration_ms += item.duration_ms
+                saw_duration = True
+
+        if emitted_audio:
+            tts_done_event = TtsCompletedEvent(
+                state.session_id,
+                turn_id=turn_id,
+                duration_ms=total_duration_ms if saw_duration else None,
+            )
+            tts_done_event.generation_id = generation_id
+            events.append(tts_done_event)
+
+        listening_status_events = await self._transition_session(
+            state,
+            SessionStatus.LISTENING,
+            f"{reason}.complete",
+        )
+        if not listening_status_events and state.status is SessionStatus.LISTENING:
+            listening_status_events = [
+                SessionStatusEvent(
+                    state.session_id,
+                    SessionStatus.LISTENING,
+                    turn_id=state.active_turn_id,
+                    reason=f"{reason}.complete",
+                )
+            ]
+        _set_generation_for_events(listening_status_events, generation_id)
+        events.extend(listening_status_events)
+        return events
+
+    async def _emit_stt_timeout_feedback(
+        self,
+        state: SessionState,
+        turn_id: str,
+        emit: ConversationEventEmitter | None,
+        *,
+        details: dict[str, Any],
+    ) -> list[ConversationEvent]:
+        timeout_ms = _safe_int(
+            details.get("timeout_ms"), int(_stt_final_timeout_seconds(state) * 1000)
+        )
+        error = OpenVoiceError(
+            code=ErrorCode.PROVIDER_ERROR,
+            message="Timed out waiting for STT final transcript.",
+            retryable=True,
+            details={
+                **details,
+                "timeout_kind": "stt_final_timeout",
+                "timeout_ms": timeout_ms,
+            },
+        )
+        error_event = ErrorEvent(state.session_id, error, turn_id=turn_id)
+        error_event.generation_id = self._response_generation_ids.get(state.session_id)
+
+        listening_events = await self._transition_session(
+            state,
+            SessionStatus.LISTENING,
+            "stt.timeout.complete",
+        )
+        if not listening_events and state.status is SessionStatus.LISTENING:
+            listening_events = [
+                SessionStatusEvent(
+                    state.session_id,
+                    SessionStatus.LISTENING,
+                    turn_id=state.active_turn_id,
+                    reason="stt.timeout.complete",
+                )
+            ]
+        events = [error_event, *listening_events]
+        if emit is not None:
+            await _emit_conversation_events(emit, events)
+            return []
+        return events
+
+    def _stt_status_events(
+        self,
+        session_id: str,
+        turn_id: str | None,
+        status: str,
+        *,
+        waited_ms: int | None = None,
+        attempt: int | None = None,
+        generation_id: str | None = None,
+    ) -> list[ConversationEvent]:
+        event = SttStatusEvent(
+            session_id,
+            status,
+            turn_id=turn_id,
+            waited_ms=waited_ms,
+            attempt=attempt,
+        )
+        event.generation_id = generation_id
+        return [event]
+
+    def _increment_client_turn_attempt(self, session_id: str, client_turn_id: str) -> int:
+        attempts = self._client_turn_attempts.setdefault(session_id, {})
+        next_attempt = attempts.get(client_turn_id, 0) + 1
+        attempts[client_turn_id] = next_attempt
+        return next_attempt
+
+    def _clear_client_turn_attempt(self, session_id: str, client_turn_id: str) -> None:
+        attempts = self._client_turn_attempts.get(session_id)
+        if attempts is None:
+            return
+        attempts.pop(client_turn_id, None)
+        if not attempts:
+            self._client_turn_attempts.pop(session_id, None)
+
     async def _close_session(self, message: SessionCloseMessage) -> list[ConversationEvent]:
         await self._cancel_response_task(message.session_id)
         await self._sessions.close(message.session_id)
@@ -1479,7 +2061,15 @@ class RealtimeConversationSession:
         self._tool_search_statuses.pop(message.session_id, None)
         self._tool_search_start_announced.pop(message.session_id, None)
         self._tool_search_end_announced.pop(message.session_id, None)
+        self._last_stt_final_at.pop(message.session_id, None)
+        self._last_stt_final_text.pop(message.session_id, None)
+        self._stt_commit_started_at.pop(message.session_id, None)
+        self._barge_in_speech_started_at.pop(message.session_id, None)
         self._turn_entered_processing_at.pop(message.session_id, None)
+        self._stt_final_revisions.pop(message.session_id, None)
+        self._last_stt_final_text_emitted.pop(message.session_id, None)
+        self._last_stt_final_turn_id_emitted.pop(message.session_id, None)
+        self._client_turn_attempts.pop(message.session_id, None)
         return [SessionClosedEvent(message.session_id)]
 
     def _tool_progress_speech_hint(self, session_id: str, event: LlmEvent) -> str | None:
@@ -1552,13 +2142,15 @@ class RealtimeConversationSession:
             return "I hit an issue while checking that."
         return None
 
-    async def _cancel_response_task(self, session_id: str) -> None:
+    async def _cancel_response_task(
+        self, session_id: str, *, await_timeout_s: float = 0.25
+    ) -> None:
         task = self._response_tasks.pop(session_id, None)
         if task is None:
             return
         task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
+        with suppress(asyncio.CancelledError, asyncio.TimeoutError):
+            await asyncio.wait_for(task, timeout=max(0.01, await_timeout_s))
 
     def _is_active_generation(self, session_id: str, generation_id: str) -> bool:
         active_generation_id = self._response_generation_ids.get(session_id)
@@ -1934,7 +2526,11 @@ class RealtimeConversationSession:
             queued = self._dequeue_turn(state.session_id)
             if queued is None:
                 return
-            if state.status not in {SessionStatus.LISTENING, SessionStatus.READY}:
+            if state.status not in {
+                SessionStatus.LISTENING,
+                SessionStatus.READY,
+                SessionStatus.TRANSCRIBING,
+            }:
                 queue = self._turn_queue.setdefault(state.session_id, [])
                 queue.insert(0, queued)
                 return
@@ -1980,7 +2576,7 @@ class RealtimeConversationSession:
         *,
         generation_id: str | None = None,
     ) -> None:
-        await self._cancel_response_task(state.session_id)
+        await self._cancel_response_task(state.session_id, await_timeout_s=0.05)
         generation_id = generation_id or self._new_generation_id()
         self._response_generation_ids[state.session_id] = generation_id
         self._preempted_generation_ids.pop(state.session_id, None)
@@ -1993,6 +2589,7 @@ class RealtimeConversationSession:
             first_llm_delta_at: float | None = None
             first_tts_chunk_at: float | None = None
             was_cancelled = False
+            completion_reason = "completed"
             try:
                 logger.info(
                     "Starting realtime response task session=%s turn=%s generation=%s",
@@ -2028,6 +2625,7 @@ class RealtimeConversationSession:
                     )
             except asyncio.CancelledError:
                 was_cancelled = True
+                completion_reason = "cancelled"
                 logger.info(
                     "Cancelled realtime response task session=%s turn=%s generation=%s",
                     state.session_id,
@@ -2036,6 +2634,8 @@ class RealtimeConversationSession:
                 )
                 raise
             except Exception as exc:
+                if isinstance(exc, TimeoutError):
+                    completion_reason = str(exc).strip() or "llm_timeout"
                 error = OpenVoiceError(
                     code=ErrorCode.PROVIDER_ERROR,
                     message=f"Realtime response task failed: {exc}",
@@ -2049,9 +2649,52 @@ class RealtimeConversationSession:
                     generation_id,
                 )
                 if self._is_active_generation(state.session_id, generation_id):
+                    timeout_kind = str(exc).strip() if isinstance(exc, TimeoutError) else None
+                    raw_message = timeout_kind or str(exc)
+                    error_text = _truncate_error_for_speech(raw_message)
+                    details: dict[str, Any] = {
+                        "session_id": state.session_id,
+                        "turn_id": turn_id,
+                    }
+                    if timeout_kind is not None:
+                        details["timeout_kind"] = timeout_kind
+                        details["first_delta_timeout_ms"] = int(
+                            _llm_first_delta_timeout_seconds(state) * 1000
+                        )
+                        details["total_timeout_ms"] = int(_llm_total_timeout_seconds(state) * 1000)
+
+                    llm_error_event = LlmErrorEvent(
+                        state.session_id,
+                        turn_id=turn_id,
+                        code=ErrorCode.PROVIDER_ERROR.value,
+                        message=error_text,
+                        retryable=True,
+                        details=details,
+                    )
+                    llm_error_event.generation_id = generation_id
+                    await emit(llm_error_event)
+
                     error_event = ErrorEvent(state.session_id, error, turn_id=turn_id)
                     error_event.generation_id = generation_id
                     await emit(error_event)
+
+                    # TODO: Replace raw exception speech with sanitized user-safe mapped messages.
+                    feedback_events = await self._build_feedback_tts_events(
+                        state,
+                        turn_id,
+                        text=f"{LLM_RAW_ERROR_PREFIX}{error_text}",
+                        reason="llm.error",
+                        generation_id=generation_id,
+                    )
+                    await _emit_conversation_events(emit, feedback_events)
+
+                    llm_done_event = LlmPhaseEvent(
+                        state.session_id,
+                        phase=LlmPhase.DONE,
+                        turn_id=turn_id,
+                    )
+                    llm_done_event.generation_id = generation_id
+                    await emit(llm_done_event)
             finally:
                 active_generation = self._is_active_generation(state.session_id, generation_id)
                 completion_time = asyncio.get_running_loop().time()
@@ -2075,6 +2718,7 @@ class RealtimeConversationSession:
                     and active_generation
                     and state.status
                     in {
+                        SessionStatus.TRANSCRIBING,
                         SessionStatus.THINKING,
                         SessionStatus.SPEAKING,
                     }
@@ -2107,7 +2751,7 @@ class RealtimeConversationSession:
                     state,
                     turn_id=turn_id,
                     cancelled=was_cancelled,
-                    reason="cancelled" if was_cancelled else "completed",
+                    reason=completion_reason,
                     llm_first_delta_at=first_llm_delta_at,
                     tts_first_chunk_at=first_tts_chunk_at,
                     completed_at=completion_time,
@@ -2200,7 +2844,7 @@ class RealtimeConversationSession:
             return
         # Drain with a short timeout to clear any pending events
         try:
-            await stream.drain(wait_seconds=0.1)
+            await stream.drain(wait_seconds=0.0)
         except Exception:
             # Ignore errors during cleanup
             pass
@@ -2271,6 +2915,8 @@ class RealtimeConversationSession:
             turn_matches,
             bool(text and text.strip()),
         )
+        router_mode = _router_mode(state)
+
         if text is None or not text.strip() or self._router_service is None:
             target = _fallback_route_target(state, self._config)
             if target is None:
@@ -2283,6 +2929,24 @@ class RealtimeConversationSession:
                 turn_id,
                 target,
                 reason="Router unavailable for this turn; using configured fallback route target.",
+            )
+            self._trace_mark_route_selected(state)
+            return events, decision
+
+        if router_mode in {"disabled", "fallback_only"}:
+            target = _fallback_route_target(state, self._config)
+            if target is None:
+                return [], None
+            logger.info(
+                "Using fallback route session=%s reason=router_mode_%s",
+                state.session_id,
+                router_mode,
+            )
+            events, decision = _fallback_route_selection(
+                state.session_id,
+                turn_id,
+                target,
+                reason=f"Router mode '{router_mode}' active; using configured fallback route target.",
             )
             self._trace_mark_route_selected(state)
             return events, decision
@@ -2722,8 +3386,36 @@ class RealtimeConversationSession:
         tts_task = asyncio.create_task(tts_worker()) if tts_enabled else None
 
         try:
+            first_delta_timeout = _llm_first_delta_timeout_seconds(state)
+            total_timeout = _llm_total_timeout_seconds(state)
             stream = self._llm_service.stream(request, engine_id=engine_id)
-            async for item in stream:
+            stream_iter = stream.__aiter__()
+            loop = asyncio.get_running_loop()
+            started_at = loop.time()
+            first_delta_deadline = started_at + first_delta_timeout
+            total_deadline = started_at + total_timeout
+
+            async def next_llm_event() -> LlmEvent:
+                now = loop.time()
+                if now >= total_deadline:
+                    raise TimeoutError("llm_total_timeout")
+
+                wait_timeout = max(0.01, total_deadline - now)
+                if first_llm_delta_at is None:
+                    wait_timeout = min(wait_timeout, max(0.01, first_delta_deadline - now))
+
+                try:
+                    return await asyncio.wait_for(stream_iter.__anext__(), timeout=wait_timeout)
+                except asyncio.TimeoutError as exc:
+                    if first_llm_delta_at is None and loop.time() >= first_delta_deadline:
+                        raise TimeoutError("llm_first_delta_timeout") from exc
+                    raise TimeoutError("llm_total_timeout") from exc
+
+            while True:
+                try:
+                    item = await next_llm_event()
+                except StopAsyncIteration:
+                    break
                 if not self._is_active_generation(state.session_id, generation_id):
                     abort_tts.set()
                     break
@@ -2747,6 +3439,16 @@ class RealtimeConversationSession:
                     trace = self._active_turn_traces.get(state.session_id)
                     if trace is not None and trace.first_llm_delta_at is None:
                         trace.first_llm_delta_at = first_llm_delta_at
+                elif first_llm_delta_at is None and item.kind in {
+                    LlmEventKind.PHASE,
+                    LlmEventKind.TOOL_UPDATE,
+                    LlmEventKind.USAGE,
+                    LlmEventKind.SUMMARY,
+                }:
+                    first_delta_deadline = max(
+                        first_delta_deadline,
+                        asyncio.get_running_loop().time() + first_delta_timeout,
+                    )
 
                 llm_conversation_events = _conversation_events_from_llm(
                     state.session_id, turn_id, [item]
@@ -2862,6 +3564,12 @@ def _route_targets(state: SessionState, config: RuntimeConfig) -> tuple[RouteTar
 
 def _fallback_route_target(state: SessionState, config: RuntimeConfig) -> RouteTarget | None:
     targets = _route_targets(state, config)
+    if targets:
+        preferred = select_route_target("moderate_route", targets)
+        if preferred is not None:
+            return preferred
+        return targets[0]
+
     if state.engine_selection.llm in {None, "opencode"}:
         return RouteTarget(
             llm_engine_id="opencode",
@@ -2869,14 +3577,7 @@ def _fallback_route_target(state: SessionState, config: RuntimeConfig) -> RouteT
             model="minimax-m2.5-free",
             profile_id="moderate_route",
         )
-
-    if not targets:
-        return None
-
-    preferred = select_route_target("moderate_route", targets)
-    if preferred is not None:
-        return preferred
-    return targets[0]
+    return None
 
 
 def _fallback_route_selection(
@@ -2952,6 +3653,9 @@ def _conversation_events_from_stt(
     stt_events: list[SttEvent],
     *,
     generation_id: str | None = None,
+    revision_store: dict[str, int] | None = None,
+    previous_text_store: dict[str, str] | None = None,
+    previous_turn_store: dict[str, str] | None = None,
 ) -> list[ConversationEvent]:
     events: list[ConversationEvent] = []
     final_by_sequence: dict[int, str] = {}
@@ -2974,11 +3678,39 @@ def _conversation_events_from_stt(
         concatenated_text = " ".join(
             text for _, text in sorted(final_by_sequence.items()) if text
         ).strip()
+        revision = 1
+        finality = "stable"
+        deferred = False
+        previous_text: str | None = None
+
+        if revision_store is not None:
+            revision = revision_store.get(session_id, 0) + 1
+            revision_store[session_id] = revision
+
+        if previous_text_store is not None:
+            previous_text = previous_text_store.get(session_id)
+            if previous_text and previous_text != concatenated_text:
+                deferred = True
+                finality = "revised"
+            elif previous_text == concatenated_text:
+                finality = "duplicate"
+            previous_text_store[session_id] = concatenated_text
+
+        if previous_turn_store is not None and turn_id:
+            previous_turn = previous_turn_store.get(session_id)
+            if previous_turn and previous_turn != turn_id:
+                deferred = True
+            previous_turn_store[session_id] = turn_id
+
         final_event = SttFinalEvent(
             session_id,
             concatenated_text,
             turn_id=turn_id,
             confidence=None,
+            revision=revision,
+            finality=finality,
+            deferred=deferred,
+            previous_text=previous_text,
         )
         final_event.generation_id = generation_id
         events.append(final_event)
@@ -3225,13 +3957,13 @@ def _interruption_config(state: SessionState) -> dict[str, Any]:
         if isinstance(interruption, dict):
             return {
                 "mode": interruption.get("mode", "immediate"),
-                "min_duration": _safe_float(interruption.get("min_duration"), 0.3),
+                "min_duration": _safe_float(interruption.get("min_duration"), 0.0),
                 "min_words": _safe_int(interruption.get("min_words"), 0),
                 "cooldown_ms": _safe_int(interruption.get("cooldown_ms"), 1000),
             }
     return {
         "mode": "immediate",
-        "min_duration": 0.3,
+        "min_duration": 0.0,
         "min_words": 0,
         "cooldown_ms": 1000,
     }
@@ -3246,6 +3978,12 @@ def _safe_int(value: Any, default: int) -> int:
         return default
 
 
+def _safe_str(value: Any, default: str | None = None) -> str | None:
+    if isinstance(value, str):
+        return value
+    return default
+
+
 def _safe_float(value: Any, default: float) -> float:
     if isinstance(value, bool):
         return default
@@ -3253,6 +3991,37 @@ def _safe_float(value: Any, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _stt_idle_threshold_seconds(state: SessionState) -> float:
+    runtime_config = state.metadata.get("runtime_config", {})
+    turn = runtime_config.get("turn_detection", {}) if isinstance(runtime_config, dict) else {}
+    timeout_ms = 900
+    if isinstance(turn, dict):
+        timeout_ms = _safe_int(turn.get("transcript_timeout_ms"), 900)
+    stabilization_ms = 0
+    if isinstance(turn, dict):
+        stabilization_ms = _safe_int(turn.get("stabilization_ms"), DEFAULT_STT_STABILIZATION_MS)
+    if stabilization_ms > 0:
+        timeout_ms = max(timeout_ms, stabilization_ms)
+    timeout_ms = max(0, timeout_ms)
+    return max(0.06, min(timeout_ms / 1000.0, 0.35))
+
+
+def _stt_idle_ready_for_commit(
+    state: SessionState,
+    *,
+    final_text: str | None,
+    last_stt_final_at: float | None,
+    now: float,
+) -> tuple[bool, float | None, float]:
+    threshold_seconds = _stt_idle_threshold_seconds(state)
+    if final_text is None or not final_text.strip():
+        return False, None, threshold_seconds
+    if last_stt_final_at is None:
+        return False, None, threshold_seconds
+    idle_seconds = max(0.0, now - last_stt_final_at)
+    return idle_seconds >= threshold_seconds, idle_seconds, threshold_seconds
 
 
 def _contains_vad_speech(
@@ -3264,7 +4033,9 @@ def _contains_vad_speech(
             return True
         if event.kind is VadEventKind.INFERENCE:
             if event.speaking is True:
-                return True
+                if event.probability is None or event.probability >= min_probability:
+                    return True
+                continue
             if event.speaking is False:
                 continue
             if event.probability is not None and event.probability >= min_probability:
@@ -3290,7 +4061,7 @@ def _contains_vad_end_of_speech(vad_events: list[VadEvent]) -> bool:
             event.kind is VadEventKind.INFERENCE
             and event.speaking is False
             and event.probability is not None
-            and event.probability < 0.1
+            and event.probability < 0.25
         ):
             return True
     return False
@@ -3309,6 +4080,69 @@ def _router_timeout_seconds(state: SessionState) -> float:
         if isinstance(router_cfg, dict):
             return float(router_cfg.get("timeout_ms", 1500)) / 1000.0
     return 1.5
+
+
+def _router_mode(state: SessionState) -> str:
+    runtime_config = state.metadata.get("runtime_config", {})
+    if isinstance(runtime_config, dict):
+        router_cfg = runtime_config.get("router", {})
+        if isinstance(router_cfg, dict):
+            mode = _safe_str(router_cfg.get("mode"))
+            if mode in {"disabled", "fallback_only", "enabled"}:
+                return mode
+    return "enabled"
+
+
+def _stt_final_timeout_seconds(state: SessionState) -> float:
+    runtime_config = state.metadata.get("runtime_config", {})
+    if isinstance(runtime_config, dict):
+        turn_queue = runtime_config.get("turn_queue", {})
+        if isinstance(turn_queue, dict) and turn_queue.get("policy") == TURN_QUEUE_POLICY_SEND_NOW:
+            return 0.35
+        stt_cfg = runtime_config.get("stt", {})
+        if isinstance(stt_cfg, dict):
+            timeout_ms = _safe_int(stt_cfg.get("final_timeout_ms"), DEFAULT_STT_FINAL_TIMEOUT_MS)
+            timeout_ms = max(200, timeout_ms)
+            return timeout_ms / 1000.0
+    return DEFAULT_STT_FINAL_TIMEOUT_MS / 1000.0
+
+
+def _stt_stabilization_seconds(state: SessionState) -> float:
+    runtime_config = state.metadata.get("runtime_config", {})
+    if isinstance(runtime_config, dict):
+        turn_cfg = runtime_config.get("turn_detection", {})
+        if isinstance(turn_cfg, dict):
+            stabilization_ms = _safe_int(
+                turn_cfg.get("stabilization_ms"), DEFAULT_STT_STABILIZATION_MS
+            )
+            stabilization_ms = max(0, min(stabilization_ms, 2000))
+            return stabilization_ms / 1000.0
+    return DEFAULT_STT_STABILIZATION_MS / 1000.0
+
+
+def _llm_first_delta_timeout_seconds(state: SessionState) -> float:
+    runtime_config = state.metadata.get("runtime_config", {})
+    if isinstance(runtime_config, dict):
+        llm_cfg = runtime_config.get("llm", {})
+        if isinstance(llm_cfg, dict):
+            timeout_ms = _safe_int(
+                llm_cfg.get("first_delta_timeout_ms"),
+                DEFAULT_LLM_FIRST_DELTA_TIMEOUT_MS,
+            )
+            timeout_ms = max(200, timeout_ms)
+            return timeout_ms / 1000.0
+    return DEFAULT_LLM_FIRST_DELTA_TIMEOUT_MS / 1000.0
+
+
+def _llm_total_timeout_seconds(state: SessionState) -> float:
+    runtime_config = state.metadata.get("runtime_config", {})
+    if isinstance(runtime_config, dict):
+        llm_cfg = runtime_config.get("llm", {})
+        if isinstance(llm_cfg, dict):
+            timeout_ms = _safe_int(llm_cfg.get("total_timeout_ms"), DEFAULT_LLM_TOTAL_TIMEOUT_MS)
+            timeout_ms = max(500, timeout_ms)
+            return timeout_ms / 1000.0
+    return DEFAULT_LLM_TOTAL_TIMEOUT_MS / 1000.0
 
 
 def _tts_audio_format(state: SessionState) -> AudioFormat:
@@ -3348,6 +4182,11 @@ def _endpointing_config(state: SessionState) -> dict[str, Any]:
 
 def _fallback_route_target(state: SessionState, config: RuntimeConfig) -> RouteTarget | None:
     targets = _route_targets(state, config)
+    if targets:
+        preferred = select_route_target("moderate_route", targets)
+        if preferred is not None:
+            return preferred
+        return targets[0]
     if state.engine_selection.llm in {None, "opencode"}:
         return RouteTarget(
             llm_engine_id="opencode",
@@ -3355,12 +4194,7 @@ def _fallback_route_target(state: SessionState, config: RuntimeConfig) -> RouteT
             model="minimax-m2.5-free",
             profile_id="moderate_route",
         )
-    if not targets:
-        return None
-    preferred = select_route_target("moderate_route", targets)
-    if preferred is not None:
-        return preferred
-    return targets[0]
+    return None
 
 
 def _route_targets(state: SessionState, config: RuntimeConfig) -> tuple[RouteTarget, ...]:
@@ -3403,6 +4237,7 @@ def _turn_detection_config(state: SessionState) -> TurnDetectionConfig:
     return TurnDetectionConfig(
         mode=parsed_mode,
         transcript_timeout_ms=int(turn.get("transcript_timeout_ms", 900)),
+        stabilization_ms=int(turn.get("stabilization_ms", DEFAULT_STT_STABILIZATION_MS)),
         min_silence_duration_ms=int(turn.get("min_silence_duration_ms", 600)),
         endpointing_mode=endpointing_cfg["mode"],
         endpointing_min_delay=endpointing_cfg["min_delay"],

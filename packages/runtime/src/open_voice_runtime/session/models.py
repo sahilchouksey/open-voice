@@ -17,6 +17,7 @@ class SessionStatus(str, Enum):
     LOADING = "loading"
     READY = "ready"
     LISTENING = "listening"
+    TRANSCRIBING = "transcribing"
     THINKING = "thinking"
     SPEAKING = "speaking"
     INTERRUPTED = "interrupted"
@@ -27,7 +28,7 @@ class SessionStatus(str, Enum):
 @dataclass(frozen=True, slots=True)
 class EngineSelection:
     stt: str | None = None
-    router: str | None = None
+    router: str | None = "arch-router"
     llm: str | None = None
     tts: str | None = None
 

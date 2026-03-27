@@ -75,4 +75,9 @@ To swap it, replace that file and keep the same name, or update `ThinkingAudioPl
 - Queue and latency visibility are exposed through:
   - `turn.queued`
   - `turn.metrics`
+- Commit correlation + STT progress visibility:
+  - client can send `client_turn_id` in `audio.commit` / `user_turn.commit`
+  - runtime emits `turn.accepted` (`client_turn_id`, `turn_id`)
+  - runtime emits `stt.status` (`queued`, `transcribing`, `waiting_final`, `stabilizing`, `retry_scheduled`)
+  - `stt.final` includes optional revision metadata: `revision`, `finality`, `deferred`, `previous_text`
 - Session config supports `turnQueue.policy` (`enqueue`, `send_now`, `inject_next_loop`) and is forwarded as `runtime_config.turn_queue.policy`.

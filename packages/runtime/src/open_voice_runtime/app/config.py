@@ -148,11 +148,40 @@ def normalize_runtime_config_payload(value: Mapping[str, Any] | None) -> dict[st
             normalized_targets.append(normalized_item)
         payload["route_targets"] = normalized_targets
 
+    router = payload.get("router")
+    if router is not None:
+        if not isinstance(router, Mapping):
+            raise TypeError("Runtime config field 'router' must be an object.")
+        normalized_router = dict(router)
+        timeout_ms = normalized_router.get("timeout_ms")
+        if timeout_ms is not None and not isinstance(timeout_ms, int):
+            raise TypeError("Runtime config field 'router.timeout_ms' must be an integer.")
+        mode = normalized_router.get("mode")
+        if mode is not None and not isinstance(mode, str):
+            raise TypeError("Runtime config field 'router.mode' must be a string.")
+        payload["router"] = normalized_router
+
     llm = payload.get("llm")
     if llm is not None:
         if not isinstance(llm, Mapping):
             raise TypeError("Runtime config field 'llm' must be an object.")
         payload["llm"] = normalize_llm_session_config_payload(llm)
+        normalized_llm = dict(payload["llm"])
+        for key in ("first_delta_timeout_ms", "total_timeout_ms"):
+            timeout_value = normalized_llm.get(key)
+            if timeout_value is not None and not isinstance(timeout_value, int):
+                raise TypeError(f"Runtime config field 'llm.{key}' must be an integer.")
+        payload["llm"] = normalized_llm
+
+    stt = payload.get("stt")
+    if stt is not None:
+        if not isinstance(stt, Mapping):
+            raise TypeError("Runtime config field 'stt' must be an object.")
+        normalized_stt = dict(stt)
+        final_timeout_ms = normalized_stt.get("final_timeout_ms")
+        if final_timeout_ms is not None and not isinstance(final_timeout_ms, int):
+            raise TypeError("Runtime config field 'stt.final_timeout_ms' must be an integer.")
+        payload["stt"] = normalized_stt
 
     turn_detection = payload.get("turn_detection")
     if turn_detection is not None:
@@ -164,6 +193,7 @@ def normalize_runtime_config_payload(value: Mapping[str, Any] | None) -> dict[st
             raise TypeError("Runtime config field 'turn_detection.mode' must be a string.")
         for key in (
             "transcript_timeout_ms",
+            "stabilization_ms",
             "min_silence_duration_ms",
             "min_speech_duration_ms",
             "vad_chunk_size",
@@ -187,6 +217,19 @@ def normalize_runtime_config_payload(value: Mapping[str, Any] | None) -> dict[st
         if policy is not None and not isinstance(policy, str):
             raise TypeError("Runtime config field 'turn_queue.policy' must be a string.")
         payload["turn_queue"] = normalized_turn_queue
+
+    retry = payload.get("retry")
+    if retry is not None:
+        if not isinstance(retry, Mapping):
+            raise TypeError("Runtime config field 'retry' must be an object.")
+        normalized_retry = dict(retry)
+        enabled = normalized_retry.get("enabled")
+        if enabled is not None and not isinstance(enabled, bool):
+            raise TypeError("Runtime config field 'retry.enabled' must be a boolean.")
+        after_ms = normalized_retry.get("after_ms")
+        if after_ms is not None and not isinstance(after_ms, int):
+            raise TypeError("Runtime config field 'retry.after_ms' must be an integer.")
+        payload["retry"] = normalized_retry
 
     # Interruption configuration
     interruption = payload.get("interruption")

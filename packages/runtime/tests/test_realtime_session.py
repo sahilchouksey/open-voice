@@ -48,8 +48,12 @@ from open_voice_runtime.transport.websocket.protocol import (
     AudioTransport,
     ConfigUpdateMessage,
     SessionStartMessage,
+    UserTurnCommitMessage,
 )
-from open_voice_runtime.transport.websocket.session import RealtimeConversationSession
+from open_voice_runtime.transport.websocket.session import (
+    RealtimeConversationSession,
+    _llm_first_delta_timeout_seconds,
+)
 from open_voice_runtime.tts.contracts import (
     TtsCapabilities,
     TtsEvent,
@@ -194,6 +198,108 @@ class FlushFinalFakeSttEngine(BaseSttEngine):
 
     async def create_stream(self, config: SttConfig) -> BaseSttStream:
         return FlushFinalFakeSttStream(self._partial_batches, self._flush_batches)
+
+    async def transcribe_file(self, request: SttFileRequest) -> SttFileResult:
+        return SttFileResult(text="")
+
+
+class DelayedFinalFakeSttStream(BaseSttStream):
+    def __init__(self) -> None:
+        self._drain_calls = 0
+
+    async def push_audio(self, chunk: AudioChunk) -> None:
+        return None
+
+    async def flush(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def drain(self, wait_seconds: float = 0.0) -> list[SttEvent]:
+        self._drain_calls += 1
+        if self._drain_calls == 1:
+            return [SttEvent(kind=SttEventKind.FINAL, text="hello there", sequence=1)]
+        if self._drain_calls == 2:
+            return [SttEvent(kind=SttEventKind.FINAL, text="hello there world", sequence=1)]
+        return []
+
+    async def events(self):
+        if False:
+            yield SttEvent(kind=SttEventKind.PARTIAL, text="", sequence=0)
+
+
+class DelayedFinalFakeSttEngine(BaseSttEngine):
+    id = "fake-stt"
+    label = "Delayed Final Fake STT"
+    capabilities = SttCapabilities()
+
+    async def load(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def create_stream(self, config: SttConfig) -> BaseSttStream:
+        return DelayedFinalFakeSttStream()
+
+    async def transcribe_file(self, request: SttFileRequest) -> SttFileResult:
+        return SttFileResult(text="")
+
+
+class ChainedRevisionFakeSttStream(BaseSttStream):
+    def __init__(self) -> None:
+        self._drain_calls = 0
+
+    async def push_audio(self, chunk: AudioChunk) -> None:
+        return None
+
+    async def flush(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def drain(self, wait_seconds: float = 0.0) -> list[SttEvent]:
+        self._drain_calls += 1
+        if self._drain_calls == 1:
+            return [SttEvent(kind=SttEventKind.FINAL, text="something about socrates", sequence=1)]
+        if self._drain_calls == 2:
+            return [
+                SttEvent(
+                    kind=SttEventKind.FINAL,
+                    text="something about socrates not god",
+                    sequence=1,
+                )
+            ]
+        if self._drain_calls == 3:
+            return [
+                SttEvent(
+                    kind=SttEventKind.FINAL,
+                    text="something about socrates not god i do not",
+                    sequence=1,
+                )
+            ]
+        return []
+
+    async def events(self):
+        if False:
+            yield SttEvent(kind=SttEventKind.PARTIAL, text="", sequence=0)
+
+
+class ChainedRevisionFakeSttEngine(BaseSttEngine):
+    id = "fake-stt"
+    label = "Chained Revision Fake STT"
+    capabilities = SttCapabilities()
+
+    async def load(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def create_stream(self, config: SttConfig) -> BaseSttStream:
+        return ChainedRevisionFakeSttStream()
 
     async def transcribe_file(self, request: SttFileRequest) -> SttFileResult:
         return SttFileResult(text="")
@@ -347,6 +453,60 @@ class FakeVadEngine(BaseVadEngine):
 
     async def create_stream(self, config: VadConfig) -> BaseVadStream:
         return FakeVadStream(self._batches)
+
+
+class MinDurationAwareFakeVadStream(BaseVadStream):
+    def __init__(self, batches: list[list[VadEvent]], *, min_speech_duration_ms: int) -> None:
+        self._batches = list(batches)
+        self._min_speech_duration_ms = min_speech_duration_ms
+
+    async def push_audio(self, chunk: AudioChunk) -> VadResult:
+        if not self._batches:
+            return VadResult()
+        events = self._batches.pop(0)
+        normalized: list[VadEvent] = []
+        for event in events:
+            copied = VadEvent(
+                kind=event.kind,
+                sequence=event.sequence,
+                timestamp_ms=event.timestamp_ms,
+                probability=event.probability,
+                speaking=event.speaking,
+                speech_duration_ms=event.speech_duration_ms,
+                silence_duration_ms=event.silence_duration_ms,
+                chunk=event.chunk,
+            )
+            if copied.kind is VadEventKind.START_OF_SPEECH:
+                copied.speech_duration_ms = float(self._min_speech_duration_ms)
+            normalized.append(copied)
+        return VadResult(events=normalized)
+
+    async def flush(self) -> VadResult:
+        return VadResult()
+
+    async def close(self) -> None:
+        return None
+
+
+class MinDurationAwareFakeVadEngine(BaseVadEngine):
+    id = "silero"
+    label = "Min Duration Aware Fake VAD"
+    capabilities = VadCapabilities(streaming=True, sample_rates_hz=(16000,))
+
+    def __init__(self, batches: list[list[VadEvent]]) -> None:
+        self._batches = batches
+
+    async def load(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def create_stream(self, config: VadConfig) -> BaseVadStream:
+        return MinDurationAwareFakeVadStream(
+            self._batches,
+            min_speech_duration_ms=config.min_speech_duration_ms,
+        )
 
 
 class DelayedFakeLlmEngine(BaseLlmEngine):
@@ -539,6 +699,35 @@ class SlowStartFakeLlmEngine(BaseLlmEngine):
         return generator()
 
 
+class NeverRespondingFakeLlmEngine(BaseLlmEngine):
+    id = "opencode"
+    label = "Never Responding Fake LLM"
+    capabilities = LlmCapabilities(streaming=True, tool_calls=True, provider_managed_sessions=True)
+
+    def __init__(self) -> None:
+        self.requests: list[LlmRequest] = []
+
+    async def load(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def complete(self, request: LlmRequest) -> LlmResponse:
+        self.requests.append(request)
+        return LlmResponse(text="")
+
+    def stream(self, request: LlmRequest) -> AsyncIterator[LlmEvent]:
+        self.requests.append(request)
+
+        async def generator() -> AsyncIterator[LlmEvent]:
+            await asyncio.sleep(60)
+            if False:
+                yield LlmEvent(kind=LlmEventKind.PHASE, phase=LlmPhase.THINKING)
+
+        return generator()
+
+
 class StaleLateDeltaFakeLlmEngine(BaseLlmEngine):
     id = "opencode"
     label = "Stale Late Delta Fake LLM"
@@ -623,7 +812,9 @@ async def _test_commit_routes_on_full_utterance() -> None:
         router_service=RouterService(router_registry),
     )
 
-    events = await session.apply_message(SessionStartMessage())
+    events = await session.apply_message(
+        SessionStartMessage(config={"turn_detection": {"stabilization_ms": 50}})
+    )
     session_id = events[0].session_id
 
     await session.apply_message(_audio_append_message(session_id, sequence=0))
@@ -633,12 +824,257 @@ async def _test_commit_routes_on_full_utterance() -> None:
 
     assert router_engine.requests[0].user_text == "Ever tried? Fail better."
     assert state.turns[0].user_text == "Ever tried? Fail better."
-    assert event_types(commit_events) == [
+    event_types_list = event_types(commit_events)
+    assert event_types_list == [
+        "session.status",
         "stt.final",
         "route.selected",
         "session.status",
         "session.status",
     ]
+    transcribing_status = next(event for event in commit_events if event.type == "session.status")
+    assert transcribing_status.status.value == "transcribing"
+
+
+def test_audio_commit_with_client_turn_id_emits_turn_accepted() -> None:
+    asyncio.run(_test_audio_commit_with_client_turn_id_emits_turn_accepted())
+
+
+async def _test_audio_commit_with_client_turn_id_emits_turn_accepted() -> None:
+    session_manager = InMemorySessionManager()
+    stt_registry = SttEngineRegistry()
+    stt_registry.register(
+        FakeSttEngine(
+            [
+                [],
+                [SttEvent(kind=SttEventKind.FINAL, text="ack this commit", sequence=1)],
+            ]
+        ),
+        default=True,
+    )
+    router_registry = RouterEngineRegistry()
+    router_registry.register(FakeRouterEngine("trivial_route"), default=True)
+
+    session = RealtimeConversationSession(
+        session_manager,
+        config=RuntimeConfig(),
+        stt_service=SttService(stt_registry),
+        router_service=RouterService(router_registry),
+    )
+
+    start_events = await session.apply_message(SessionStartMessage())
+    session_id = start_events[0].session_id
+    await session.apply_message(_audio_append_message(session_id, sequence=0))
+
+    commit_events = await session.apply_message(
+        AudioCommitMessage(session_id=session_id, client_turn_id="ct-123")
+    )
+
+    assert commit_events[0].type == "turn.accepted"
+    assert commit_events[0].client_turn_id == "ct-123"
+    assert commit_events[0].turn_id is not None
+    stt_final = next(event for event in commit_events if event.type == "stt.final")
+    assert stt_final.turn_id == commit_events[0].turn_id
+
+
+def test_audio_commit_emits_stt_status_progress_events() -> None:
+    asyncio.run(_test_audio_commit_emits_stt_status_progress_events())
+
+
+async def _test_audio_commit_emits_stt_status_progress_events() -> None:
+    session_manager = InMemorySessionManager()
+    stt_registry = SttEngineRegistry()
+    stt_registry.register(
+        DelayedFinalFakeSttEngine(),
+        default=True,
+    )
+    router_registry = RouterEngineRegistry()
+    router_registry.register(FakeRouterEngine("trivial_route"), default=True)
+
+    session = RealtimeConversationSession(
+        session_manager,
+        config=RuntimeConfig(),
+        stt_service=SttService(stt_registry),
+        router_service=RouterService(router_registry),
+    )
+
+    start_events = await session.apply_message(
+        SessionStartMessage(config={"turn_detection": {"stabilization_ms": 20}})
+    )
+    session_id = start_events[0].session_id
+    await session.apply_message(_audio_append_message(session_id, sequence=0))
+
+    commit_events = await session.apply_message(
+        AudioCommitMessage(session_id=session_id, client_turn_id="ct-progress-1")
+    )
+    statuses = [event.status for event in commit_events if event.type == "stt.status"]
+
+    assert "queued" in statuses
+    assert "transcribing" in statuses
+    assert "waiting_final" in statuses
+    assert "stabilizing" in statuses
+
+
+def test_stt_final_includes_revision_and_finality() -> None:
+    asyncio.run(_test_stt_final_includes_revision_and_finality())
+
+
+async def _test_stt_final_includes_revision_and_finality() -> None:
+    session_manager = InMemorySessionManager()
+    stt_registry = SttEngineRegistry()
+    stt_registry.register(DelayedFinalFakeSttEngine(), default=True)
+    router_registry = RouterEngineRegistry()
+    router_registry.register(FakeRouterEngine("trivial_route"), default=True)
+
+    session = RealtimeConversationSession(
+        session_manager,
+        config=RuntimeConfig(),
+        stt_service=SttService(stt_registry),
+        router_service=RouterService(router_registry),
+    )
+
+    start_events = await session.apply_message(
+        SessionStartMessage(config={"turn_detection": {"stabilization_ms": 20}})
+    )
+    session_id = start_events[0].session_id
+    await session.apply_message(_audio_append_message(session_id, sequence=0))
+
+    commit_events = await session.apply_message(AudioCommitMessage(session_id=session_id))
+    final_event = next(event for event in commit_events if event.type == "stt.final")
+
+    assert final_event.revision is not None
+    assert final_event.revision >= 1
+    assert final_event.finality in {"stable", "revised"}
+    assert isinstance(final_event.deferred, bool)
+
+
+def test_llm_first_delta_timeout_has_more_reasonable_default() -> None:
+    asyncio.run(_test_llm_first_delta_timeout_has_more_reasonable_default())
+
+
+async def _test_llm_first_delta_timeout_has_more_reasonable_default() -> None:
+    session_manager = InMemorySessionManager()
+    session = RealtimeConversationSession(session_manager, config=RuntimeConfig())
+    start_events = await session.apply_message(SessionStartMessage())
+    session_id = start_events[0].session_id
+    state = await session_manager.get(session_id)
+
+    timeout_seconds = cast(float, _llm_first_delta_timeout_seconds(state))
+    assert timeout_seconds >= 30.0
+
+
+def test_llm_first_delta_timeout_extends_on_non_delta_progress() -> None:
+    asyncio.run(_test_llm_first_delta_timeout_extends_on_non_delta_progress())
+
+
+async def _test_llm_first_delta_timeout_extends_on_non_delta_progress() -> None:
+    session_manager = InMemorySessionManager()
+
+    stt_registry = SttEngineRegistry()
+    stt_registry.register(
+        FakeSttEngine(
+            [
+                [],
+                [SttEvent(kind=SttEventKind.FINAL, text="search this", sequence=1)],
+            ]
+        ),
+        default=True,
+    )
+
+    router_registry = RouterEngineRegistry()
+    router_registry.register(FakeRouterEngine("moderate_route"), default=True)
+
+    llm_registry = LlmEngineRegistry()
+    llm_registry.register(ToolRunningThenDelayFakeLlmEngine(hold_seconds=0.35), default=True)
+
+    tts_registry = TtsEngineRegistry()
+    tts_registry.register(FakeTtsEngine(), default=True)
+
+    session = RealtimeConversationSession(
+        session_manager,
+        config=RuntimeConfig(),
+        stt_service=SttService(stt_registry),
+        router_service=RouterService(router_registry),
+        llm_service=LlmService(llm_registry),
+        tts_service=TtsService(tts_registry),
+    )
+
+    start_events = await session.apply_message(
+        SessionStartMessage(
+            config={
+                "llm": {
+                    "first_delta_timeout_ms": 200,
+                    "total_timeout_ms": 3000,
+                }
+            }
+        )
+    )
+    session_id = start_events[0].session_id
+    await session.apply_message(_audio_append_message(session_id, sequence=0))
+
+    emitted: list[dict[str, Any]] = []
+
+    async def emit(payload: dict[str, Any]) -> None:
+        emitted.append(payload)
+
+    await session.apply(
+        {
+            "type": "audio.commit",
+            "session_id": session_id,
+        },
+        emit=emit,
+    )
+
+    await asyncio.sleep(0.9)
+
+    assert any(item.get("type") == "llm.response.delta" for item in emitted)
+    assert not any(
+        item.get("type") == "llm.error"
+        and item.get("error", {}).get("details", {}).get("timeout_kind")
+        == "llm_first_delta_timeout"
+        for item in emitted
+    )
+
+
+def test_user_turn_commit_with_client_turn_id_emits_turn_accepted() -> None:
+    asyncio.run(_test_user_turn_commit_with_client_turn_id_emits_turn_accepted())
+
+
+async def _test_user_turn_commit_with_client_turn_id_emits_turn_accepted() -> None:
+    session_manager = InMemorySessionManager()
+    stt_registry = SttEngineRegistry()
+    stt_registry.register(
+        FakeSttEngine(
+            [
+                [],
+                [SttEvent(kind=SttEventKind.FINAL, text="ack via user turn commit", sequence=1)],
+            ]
+        ),
+        default=True,
+    )
+    router_registry = RouterEngineRegistry()
+    router_registry.register(FakeRouterEngine("trivial_route"), default=True)
+
+    session = RealtimeConversationSession(
+        session_manager,
+        config=RuntimeConfig(),
+        stt_service=SttService(stt_registry),
+        router_service=RouterService(router_registry),
+    )
+
+    start_events = await session.apply_message(SessionStartMessage())
+    session_id = start_events[0].session_id
+    await session.apply_message(_audio_append_message(session_id, sequence=0))
+
+    commit_events = await session.apply_message(
+        UserTurnCommitMessage(session_id=session_id, client_turn_id="ct-user-456")
+    )
+
+    assert commit_events[0].type == "turn.accepted"
+    assert commit_events[0].client_turn_id == "ct-user-456"
+    assert commit_events[0].turn_id is not None
+    stt_final = next(event for event in commit_events if event.type == "stt.final")
+    assert stt_final.turn_id == commit_events[0].turn_id
 
 
 def test_session_runtime_config_overrides_route_targets() -> None:
@@ -768,7 +1204,9 @@ async def _test_commit_streams_llm_events_and_stores_assistant_text() -> None:
         tts_service=TtsService(tts_registry),
     )
 
-    events = await session.apply_message(SessionStartMessage())
+    events = await session.apply_message(
+        SessionStartMessage(config={"turn_detection": {"stabilization_ms": 50}})
+    )
     session_id = events[0].session_id
 
     await session.apply_message(_audio_append_message(session_id, sequence=0))
@@ -776,6 +1214,7 @@ async def _test_commit_streams_llm_events_and_stores_assistant_text() -> None:
     state = await session_manager.get(session_id)
 
     assert event_types(commit_events) == [
+        "session.status",
         "stt.final",
         "route.selected",
         "session.status",
@@ -1996,6 +2435,482 @@ async def _test_send_now_policy_interrupts_immediately_while_speaking() -> None:
     )
 
 
+def test_send_now_with_min_duration_requires_sustained_vad_before_interrupt() -> None:
+    asyncio.run(_test_send_now_with_min_duration_requires_sustained_vad_before_interrupt())
+
+
+async def _test_send_now_with_min_duration_requires_sustained_vad_before_interrupt() -> None:
+    session_manager = InMemorySessionManager()
+    stt_registry = SttEngineRegistry()
+    stt_registry.register(
+        MultiStreamFakeSttEngine(
+            [
+                [
+                    [],
+                    [SttEvent(kind=SttEventKind.FINAL, text="first", sequence=1)],
+                ],
+                [
+                    [SttEvent(kind=SttEventKind.PARTIAL, text="h", sequence=2)],
+                    [SttEvent(kind=SttEventKind.FINAL, text="second", sequence=3)],
+                ],
+            ]
+        ),
+        default=True,
+    )
+
+    vad_registry = VadEngineRegistry()
+    vad_registry.register(
+        MinDurationAwareFakeVadEngine(
+            [
+                [
+                    VadEvent(
+                        kind=VadEventKind.START_OF_SPEECH,
+                        sequence=0,
+                        timestamp_ms=0.0,
+                    )
+                ],
+                [
+                    VadEvent(
+                        kind=VadEventKind.START_OF_SPEECH,
+                        sequence=1,
+                        timestamp_ms=20.0,
+                    )
+                ],
+                [
+                    VadEvent(
+                        kind=VadEventKind.START_OF_SPEECH,
+                        sequence=2,
+                        timestamp_ms=40.0,
+                    )
+                ],
+            ]
+        ),
+        default=True,
+    )
+
+    router_registry = RouterEngineRegistry()
+    router_registry.register(FakeRouterEngine("moderate_route"), default=True)
+
+    llm_registry = LlmEngineRegistry()
+    llm_registry.register(EchoDelayedFakeLlmEngine(delay_seconds=0.04), default=True)
+
+    tts_registry = TtsEngineRegistry()
+    tts_registry.register(FakeTtsEngine(complete_delay_seconds=0.25), default=True)
+
+    session = RealtimeConversationSession(
+        session_manager,
+        config=RuntimeConfig(),
+        stt_service=SttService(stt_registry),
+        vad_service=VadService(vad_registry),
+        router_service=RouterService(router_registry),
+        llm_service=LlmService(llm_registry),
+        tts_service=TtsService(tts_registry),
+    )
+
+    start_events = await session.apply_message(
+        SessionStartMessage(
+            config={
+                "turn_queue": {"policy": "send_now"},
+                "interruption": {"min_duration": 0.15, "cooldown_ms": 1000},
+                "turn_detection": {"min_speech_duration_ms": 220},
+            }
+        )
+    )
+    session_id = start_events[0].session_id
+
+    emitted: list[dict[str, Any]] = []
+
+    async def emit(payload: dict[str, Any]) -> None:
+        emitted.append(payload)
+
+    await session.apply(_audio_append_payload(session_id, sequence=0), emit=emit)
+    await session.apply(
+        {
+            "type": "audio.commit",
+            "session_id": session_id,
+        },
+        emit=emit,
+    )
+
+    async def _wait_for_first_tts_chunk(timeout_seconds: float = 1.5) -> str:
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while asyncio.get_running_loop().time() < deadline:
+            for item in emitted:
+                if item.get("type") == "tts.chunk" and item.get("generation_id"):
+                    generation_id = item.get("generation_id")
+                    if isinstance(generation_id, str):
+                        return generation_id
+            await asyncio.sleep(0.01)
+        raise AssertionError("Timed out waiting for first tts.chunk event")
+
+    first_generation_id = await _wait_for_first_tts_chunk()
+
+    await session.apply(_audio_append_payload(session_id, sequence=1), emit=emit)
+    await asyncio.sleep(0.08)
+
+    assert not any(
+        item.get("type") == "conversation.interrupted" and item.get("reason") == "send_now"
+        for item in emitted
+    )
+
+    await session.apply(_audio_append_payload(session_id, sequence=2), emit=emit)
+    await session.apply(
+        {
+            "type": "audio.commit",
+            "session_id": session_id,
+        },
+        emit=emit,
+    )
+
+    await asyncio.sleep(0.55)
+
+    interrupts = [
+        item
+        for item in emitted
+        if item.get("type") == "conversation.interrupted" and item.get("reason") == "send_now"
+    ]
+    assert len(interrupts) == 1
+    assert interrupts[0].get("generation_id") == first_generation_id
+
+
+def test_send_now_interrupt_works_during_post_interrupt_collecting() -> None:
+    asyncio.run(_test_send_now_interrupt_works_during_post_interrupt_collecting())
+
+
+async def _test_send_now_interrupt_works_during_post_interrupt_collecting() -> None:
+    session_manager = InMemorySessionManager()
+
+    stt_registry = SttEngineRegistry()
+    stt_registry.register(
+        MultiStreamFakeSttEngine(
+            [
+                [
+                    [],
+                    [SttEvent(kind=SttEventKind.FINAL, text="first question", sequence=1)],
+                ],
+                [
+                    [SttEvent(kind=SttEventKind.FINAL, text="interrupt one", sequence=2)],
+                    [],
+                ],
+                [
+                    [SttEvent(kind=SttEventKind.FINAL, text="interrupt two", sequence=3)],
+                    [],
+                ],
+            ]
+        ),
+        default=True,
+    )
+
+    vad_registry = VadEngineRegistry()
+    vad_registry.register(
+        FakeVadEngine(
+            [
+                [VadEvent(kind=VadEventKind.START_OF_SPEECH, sequence=0, timestamp_ms=0.0)],
+                [VadEvent(kind=VadEventKind.START_OF_SPEECH, sequence=1, timestamp_ms=40.0)],
+                [VadEvent(kind=VadEventKind.START_OF_SPEECH, sequence=2, timestamp_ms=80.0)],
+            ]
+        ),
+        default=True,
+    )
+
+    router_registry = RouterEngineRegistry()
+    router_registry.register(FakeRouterEngine("moderate_route"), default=True)
+
+    llm_registry = LlmEngineRegistry()
+    llm_registry.register(EchoDelayedFakeLlmEngine(delay_seconds=0.12), default=True)
+
+    tts_registry = TtsEngineRegistry()
+    tts_registry.register(FakeTtsEngine(complete_delay_seconds=0.3), default=True)
+
+    session = RealtimeConversationSession(
+        session_manager,
+        config=RuntimeConfig(),
+        stt_service=SttService(stt_registry),
+        vad_service=VadService(vad_registry),
+        router_service=RouterService(router_registry),
+        llm_service=LlmService(llm_registry),
+        tts_service=TtsService(tts_registry),
+    )
+
+    start_events = await session.apply_message(
+        SessionStartMessage(
+            config={
+                "turn_queue": {"policy": "send_now"},
+                "turn_detection": {"mode": "hybrid", "transcript_timeout_ms": 0},
+            }
+        )
+    )
+    session_id = start_events[0].session_id
+
+    emitted: list[dict[str, Any]] = []
+
+    async def emit(payload: dict[str, Any]) -> None:
+        emitted.append(payload)
+
+    await session.apply(_audio_append_payload(session_id, sequence=0), emit=emit)
+    await session.apply(
+        {
+            "type": "audio.commit",
+            "session_id": session_id,
+        },
+        emit=emit,
+    )
+
+    async def _wait_for_status(status: str, timeout_seconds: float = 1.4) -> None:
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while asyncio.get_running_loop().time() < deadline:
+            if any(
+                item.get("type") == "session.status" and item.get("status") == status
+                for item in emitted
+            ):
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError(f"Timed out waiting for session status '{status}'")
+
+    await _wait_for_status("thinking")
+
+    await session.apply(_audio_append_payload(session_id, sequence=1), emit=emit)
+    await asyncio.sleep(0.05)
+    await session.apply(_audio_append_payload(session_id, sequence=2), emit=emit)
+
+    await asyncio.sleep(0.9)
+
+    interrupts = [
+        item
+        for item in emitted
+        if item.get("type") == "conversation.interrupted" and item.get("reason") == "send_now"
+    ]
+    assert len(interrupts) >= 2
+
+    route_events = [item for item in emitted if item.get("type") == "route.selected"]
+    assert len(route_events) >= 2
+
+
+def test_commit_reports_stt_timeout_with_spoken_feedback() -> None:
+    asyncio.run(_test_commit_reports_stt_timeout_with_spoken_feedback())
+
+
+async def _test_commit_reports_stt_timeout_with_spoken_feedback() -> None:
+    session_manager = InMemorySessionManager()
+
+    stt_registry = SttEngineRegistry()
+    stt_registry.register(
+        FakeSttEngine(
+            [
+                [],
+                [],
+                [],
+            ]
+        ),
+        default=True,
+    )
+
+    tts_registry = TtsEngineRegistry()
+    tts_engine = FakeTtsEngine()
+    tts_registry.register(tts_engine, default=True)
+
+    session = RealtimeConversationSession(
+        session_manager,
+        config=RuntimeConfig(),
+        stt_service=SttService(stt_registry),
+        tts_service=TtsService(tts_registry),
+    )
+
+    start_events = await session.apply_message(
+        SessionStartMessage(config={"stt": {"final_timeout_ms": 80}})
+    )
+    session_id = start_events[0].session_id
+
+    await session.apply_message(_audio_append_message(session_id, sequence=0))
+
+    emitted: list[dict[str, Any]] = []
+
+    async def emit(payload: dict[str, Any]) -> None:
+        emitted.append(payload)
+
+    await session.apply(
+        {
+            "type": "audio.commit",
+            "session_id": session_id,
+        },
+        emit=emit,
+    )
+
+    error_event = next(item for item in emitted if item.get("type") == "error")
+    assert error_event.get("details", {}).get("timeout_kind") == "stt_final_timeout"
+    assert error_event.get("retryable") is True
+
+    assert not any(item.get("type") == "tts.chunk" for item in emitted)
+    assert any(
+        item.get("type") == "session.status" and item.get("status") == "listening"
+        for item in emitted
+    )
+
+    assert not tts_engine.requests
+
+
+def test_commit_timeout_emits_retry_scheduled_when_enabled() -> None:
+    asyncio.run(_test_commit_timeout_emits_retry_scheduled_when_enabled())
+
+
+async def _test_commit_timeout_emits_retry_scheduled_when_enabled() -> None:
+    session_manager = InMemorySessionManager()
+
+    stt_registry = SttEngineRegistry()
+    stt_registry.register(
+        FakeSttEngine(
+            [
+                [],
+                [],
+                [],
+            ]
+        ),
+        default=True,
+    )
+
+    session = RealtimeConversationSession(
+        session_manager,
+        config=RuntimeConfig(),
+        stt_service=SttService(stt_registry),
+    )
+
+    start_events = await session.apply_message(
+        SessionStartMessage(
+            config={
+                "stt": {"final_timeout_ms": 50},
+                "retry": {"enabled": True, "after_ms": 25},
+            }
+        )
+    )
+    session_id = start_events[0].session_id
+
+    await session.apply_message(_audio_append_message(session_id, sequence=0))
+
+    emitted: list[dict[str, Any]] = []
+
+    async def emit(payload: dict[str, Any]) -> None:
+        emitted.append(payload)
+
+    await session.apply(
+        {
+            "type": "audio.commit",
+            "session_id": session_id,
+            "client_turn_id": "ct-retry-1",
+        },
+        emit=emit,
+    )
+
+    retry_event = next(
+        item
+        for item in emitted
+        if item.get("type") == "stt.status" and item.get("status") == "retry_scheduled"
+    )
+    assert retry_event.get("attempt") == 2
+    assert retry_event.get("waited_ms") == 25
+
+    accepted_events = [
+        item
+        for item in emitted
+        if item.get("type") == "turn.accepted" and item.get("client_turn_id") == "ct-retry-1"
+    ]
+    assert len(accepted_events) == 2
+
+
+def test_commit_reports_llm_first_delta_timeout_with_spoken_feedback() -> None:
+    asyncio.run(_test_commit_reports_llm_first_delta_timeout_with_spoken_feedback())
+
+
+async def _test_commit_reports_llm_first_delta_timeout_with_spoken_feedback() -> None:
+    session_manager = InMemorySessionManager()
+
+    stt_registry = SttEngineRegistry()
+    stt_registry.register(
+        FakeSttEngine(
+            [
+                [],
+                [SttEvent(kind=SttEventKind.FINAL, text="tell me a joke", sequence=1)],
+            ]
+        ),
+        default=True,
+    )
+
+    router_registry = RouterEngineRegistry()
+    router_registry.register(FakeRouterEngine("moderate_route"), default=True)
+
+    llm_registry = LlmEngineRegistry()
+    llm_registry.register(NeverRespondingFakeLlmEngine(), default=True)
+
+    tts_registry = TtsEngineRegistry()
+    tts_engine = FakeTtsEngine()
+    tts_registry.register(tts_engine, default=True)
+
+    session = RealtimeConversationSession(
+        session_manager,
+        config=RuntimeConfig(),
+        stt_service=SttService(stt_registry),
+        router_service=RouterService(router_registry),
+        llm_service=LlmService(llm_registry),
+        tts_service=TtsService(tts_registry),
+    )
+
+    start_events = await session.apply_message(
+        SessionStartMessage(
+            config={
+                "llm": {
+                    "first_delta_timeout_ms": 300,
+                    "total_timeout_ms": 2000,
+                }
+            }
+        )
+    )
+    session_id = start_events[0].session_id
+
+    await session.apply_message(_audio_append_message(session_id, sequence=0))
+
+    emitted: list[dict[str, Any]] = []
+
+    async def emit(payload: dict[str, Any]) -> None:
+        emitted.append(payload)
+
+    await session.apply(
+        {
+            "type": "audio.commit",
+            "session_id": session_id,
+        },
+        emit=emit,
+    )
+
+    await asyncio.sleep(0.8)
+
+    error_event = next(item for item in emitted if item.get("type") == "error")
+    timeout_details = error_event.get("details", {})
+    assert timeout_details.get("session_id") == session_id
+    assert timeout_details.get("turn_id")
+    assert error_event.get("retryable") is False
+
+    llm_error_event = next(item for item in emitted if item.get("type") == "llm.error")
+    assert llm_error_event.get("error", {}).get("code") == "provider_error"
+    assert llm_error_event.get("error", {}).get("retryable") is True
+    assert (
+        llm_error_event.get("error", {}).get("details", {}).get("timeout_kind")
+        == "llm_first_delta_timeout"
+    )
+
+    assert any(
+        item.get("type") == "tts.chunk"
+        and item.get("text_segment") == "I hit an error: llm_first_delta_timeout"
+        for item in emitted
+    )
+    assert any(
+        item.get("type") == "session.status" and item.get("status") == "listening"
+        for item in emitted
+    )
+
+    assert any(
+        request.text == "I hit an error: llm_first_delta_timeout" for request in tts_engine.requests
+    )
+
+
 def test_send_now_cuts_over_immediately_on_new_stt_final() -> None:
     asyncio.run(_test_send_now_cuts_over_immediately_on_new_stt_final())
 
@@ -2904,6 +3819,168 @@ def _audio_append_payload(session_id: str, *, sequence: int) -> dict[str, Any]:
             "data_base64": base64.b64encode(b"\x00\x00").decode("ascii"),
         },
     }
+
+
+def test_commit_transitions_through_transcribing_before_thinking() -> None:
+    asyncio.run(_test_commit_transitions_through_transcribing_before_thinking())
+
+
+async def _test_commit_transitions_through_transcribing_before_thinking() -> None:
+    session_manager = InMemorySessionManager()
+    stt_registry = SttEngineRegistry()
+    stt_registry.register(
+        FakeSttEngine(
+            [
+                [],
+                [SttEvent(kind=SttEventKind.FINAL, text="Plan this.", sequence=1)],
+            ]
+        ),
+        default=True,
+    )
+    router_registry = RouterEngineRegistry()
+    router_registry.register(FakeRouterEngine("simple_route"), default=True)
+    llm_registry = LlmEngineRegistry()
+    llm_registry.register(
+        FakeLlmEngine(
+            [
+                LlmEvent(kind=LlmEventKind.PHASE, phase=LlmPhase.THINKING),
+                LlmEvent(
+                    kind=LlmEventKind.RESPONSE_DELTA,
+                    text="Done.",
+                    lane=LlmOutputLane.SPEECH,
+                    part_id="part-1",
+                ),
+                LlmEvent(kind=LlmEventKind.COMPLETED, text="Done.", finish_reason="stop"),
+            ]
+        ),
+        default=True,
+    )
+    tts_registry = TtsEngineRegistry()
+    tts_registry.register(FakeTtsEngine(), default=True)
+
+    session = RealtimeConversationSession(
+        session_manager,
+        config=RuntimeConfig(),
+        stt_service=SttService(stt_registry),
+        router_service=RouterService(router_registry),
+        llm_service=LlmService(llm_registry),
+        tts_service=TtsService(tts_registry),
+    )
+
+    start_events = await session.apply_message(
+        SessionStartMessage(config={"turn_detection": {"stabilization_ms": 50}})
+    )
+    session_id = start_events[0].session_id
+    await session.apply_message(_audio_append_message(session_id, sequence=0))
+    commit_events = await session.apply_message(AudioCommitMessage(session_id=session_id))
+
+    statuses = [
+        event.status.value if hasattr(event.status, "value") else event.status
+        for event in commit_events
+        if event.type == "session.status"
+    ]
+    assert "transcribing" in statuses
+    assert "thinking" in statuses
+    assert statuses.index("transcribing") < statuses.index("thinking")
+
+
+def test_stt_stabilization_uses_latest_final_revision_before_routing() -> None:
+    asyncio.run(_test_stt_stabilization_uses_latest_final_revision_before_routing())
+
+
+async def _test_stt_stabilization_uses_latest_final_revision_before_routing() -> None:
+    session_manager = InMemorySessionManager()
+    stt_registry = SttEngineRegistry()
+    stt_registry.register(DelayedFinalFakeSttEngine(), default=True)
+    router_registry = RouterEngineRegistry()
+    router_engine = FakeRouterEngine("simple_route")
+    router_registry.register(router_engine, default=True)
+
+    session = RealtimeConversationSession(
+        session_manager,
+        config=RuntimeConfig(),
+        stt_service=SttService(stt_registry),
+        router_service=RouterService(router_registry),
+    )
+
+    start_events = await session.apply_message(
+        SessionStartMessage(
+            config={
+                "turn_detection": {
+                    "stabilization_ms": 20,
+                }
+            }
+        )
+    )
+    session_id = start_events[0].session_id
+    await session.apply_message(_audio_append_message(session_id, sequence=0))
+    await session.apply_message(AudioCommitMessage(session_id=session_id))
+
+    assert router_engine.requests
+    assert router_engine.requests[0].user_text == "hello there world"
+
+
+def test_slow_stt_chained_revisions_produce_single_stable_turn_without_oscillation() -> None:
+    asyncio.run(_test_slow_stt_chained_revisions_produce_single_stable_turn_without_oscillation())
+
+
+async def _test_slow_stt_chained_revisions_produce_single_stable_turn_without_oscillation() -> None:
+    session_manager = InMemorySessionManager()
+    stt_registry = SttEngineRegistry()
+    stt_registry.register(ChainedRevisionFakeSttEngine(), default=True)
+    router_registry = RouterEngineRegistry()
+    router_engine = FakeRouterEngine("moderate_route")
+    router_registry.register(router_engine, default=True)
+    llm_registry = LlmEngineRegistry()
+    llm_engine = EchoDelayedFakeLlmEngine(delay_seconds=0.02)
+    llm_registry.register(llm_engine, default=True)
+    tts_registry = TtsEngineRegistry()
+    tts_registry.register(FakeTtsEngine(), default=True)
+
+    session = RealtimeConversationSession(
+        session_manager,
+        config=RuntimeConfig(),
+        stt_service=SttService(stt_registry),
+        router_service=RouterService(router_registry),
+        llm_service=LlmService(llm_registry),
+        tts_service=TtsService(tts_registry),
+    )
+
+    start_events = await session.apply_message(
+        SessionStartMessage(
+            config={
+                "turn_queue": {"policy": "send_now"},
+                "turn_detection": {"mode": "manual", "stabilization_ms": 40},
+            }
+        )
+    )
+    session_id = start_events[0].session_id
+    await session.apply_message(_audio_append_message(session_id, sequence=0))
+
+    emitted: list[dict[str, Any]] = []
+
+    async def emit(payload: dict[str, Any]) -> None:
+        emitted.append(payload)
+
+    await session.apply(
+        {
+            "type": "audio.commit",
+            "session_id": session_id,
+        },
+        emit=emit,
+    )
+    await asyncio.sleep(0.2)
+
+    route_events = [item for item in emitted if item.get("type") == "route.selected"]
+    thinking_statuses = [
+        item
+        for item in emitted
+        if item.get("type") == "session.status" and item.get("status") == "thinking"
+    ]
+    assert len(route_events) == 1
+    assert len(thinking_statuses) == 1
+    assert router_engine.requests
+    assert router_engine.requests[0].user_text == "something about socrates not god i do not"
 
 
 def event_types(events: list[Any]) -> list[str]:

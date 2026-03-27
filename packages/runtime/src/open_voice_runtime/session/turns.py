@@ -22,6 +22,7 @@ class TurnDetectionMode(str, Enum):
 class TurnDetectionConfig:
     mode: TurnDetectionMode = TurnDetectionMode.MANUAL
     transcript_timeout_ms: int = 900
+    stabilization_ms: int = 0
     min_silence_duration_ms: int = 600
     # EndPointing configuration (inspired by LiveKit)
     endpointing_mode: str = "fixed"  # "fixed" or "dynamic"
@@ -145,9 +146,14 @@ class TurnRecognition:
         drain: Callable[[float], Awaitable[list[SttEvent]]],
         *,
         timeout_seconds: float,
+        stabilization_seconds: float = 0.0,
     ) -> TurnRecognitionResult:
         buffer = self.buffer_for(session_id)
-        stt_events = await _drain_commit_events(drain, timeout_seconds=timeout_seconds)
+        stt_events = await _drain_commit_events(
+            drain,
+            timeout_seconds=timeout_seconds,
+            stabilization_seconds=stabilization_seconds,
+        )
         _remember_final_segments(buffer, stt_events)
         return TurnRecognitionResult(
             stt_events=stt_events,
@@ -260,9 +266,12 @@ async def _drain_commit_events(
     drain: Callable[[float], Awaitable[list[SttEvent]]],
     *,
     timeout_seconds: float,
+    stabilization_seconds: float,
 ) -> list[SttEvent]:
     events: list[SttEvent] = []
     saw_final = False
+    latest_final_text: str | None = None
+    latest_final_changed_at: float | None = None
     deadline = asyncio.get_running_loop().time() + timeout_seconds
 
     while True:
@@ -271,13 +280,42 @@ async def _drain_commit_events(
             return events
 
         batch = await drain(min(0.25, remaining))
+        now = asyncio.get_running_loop().time()
         if batch:
             events.extend(batch)
             saw_final = saw_final or any(item.kind is SttEventKind.FINAL for item in batch)
+            if saw_final and stabilization_seconds > 0.0:
+                final_text = _final_text_from_events(events)
+                if final_text is not None and final_text.strip():
+                    if final_text != latest_final_text:
+                        latest_final_text = final_text
+                        latest_final_changed_at = now
             continue
 
         if saw_final:
-            return events
+            if stabilization_seconds <= 0.0:
+                return events
+            if latest_final_changed_at is None:
+                return events
+            if now - latest_final_changed_at >= stabilization_seconds:
+                return events
+            continue
+
+        if not saw_final:
+            continue
+
+
+def _final_text_from_events(stt_events: list[SttEvent]) -> str | None:
+    by_sequence: dict[int, str] = {}
+    for item in stt_events:
+        if item.kind is not SttEventKind.FINAL:
+            continue
+        text = item.text.strip()
+        if text:
+            by_sequence[item.sequence] = text
+    if not by_sequence:
+        return None
+    return " ".join(text for _, text in sorted(by_sequence.items()) if text)
 
 
 def _remember_final_segments(buffer: SessionTurnBuffer, stt_events: list[SttEvent]) -> None:

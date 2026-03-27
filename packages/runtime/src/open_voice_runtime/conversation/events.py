@@ -142,6 +142,10 @@ class SttPartialEvent(BaseConversationEvent):
 class SttFinalEvent(BaseConversationEvent):
     text: str = ""
     confidence: float | None = None
+    revision: int | None = None
+    finality: str | None = None
+    deferred: bool | None = None
+    previous_text: str | None = None
 
     def __init__(
         self,
@@ -150,6 +154,10 @@ class SttFinalEvent(BaseConversationEvent):
         *,
         turn_id: str | None = None,
         confidence: float | None = None,
+        revision: int | None = None,
+        finality: str | None = None,
+        deferred: bool | None = None,
+        previous_text: str | None = None,
     ) -> None:
         BaseConversationEvent.__init__(
             self,
@@ -159,6 +167,36 @@ class SttFinalEvent(BaseConversationEvent):
         )
         self.text = text
         self.confidence = confidence
+        self.revision = revision
+        self.finality = finality
+        self.deferred = deferred
+        self.previous_text = previous_text
+
+
+@dataclass(slots=True)
+class SttStatusEvent(BaseConversationEvent):
+    status: str = "queued"
+    waited_ms: int | None = None
+    attempt: int | None = None
+
+    def __init__(
+        self,
+        session_id: str,
+        status: str,
+        *,
+        turn_id: str | None = None,
+        waited_ms: int | None = None,
+        attempt: int | None = None,
+    ) -> None:
+        BaseConversationEvent.__init__(
+            self,
+            type="stt.status",
+            session_id=session_id,
+            turn_id=turn_id,
+        )
+        self.status = status
+        self.waited_ms = waited_ms
+        self.attempt = attempt
 
 
 @dataclass(slots=True)
@@ -391,6 +429,36 @@ class LlmCompletedEvent(BaseConversationEvent):
 
 
 @dataclass(slots=True)
+class LlmErrorEvent(BaseConversationEvent):
+    error: dict[str, Any] = field(default_factory=dict)
+
+    def __init__(
+        self,
+        session_id: str,
+        *,
+        code: str,
+        message: str,
+        retryable: bool,
+        turn_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        BaseConversationEvent.__init__(
+            self,
+            type="llm.error",
+            session_id=session_id,
+            turn_id=turn_id,
+        )
+        payload: dict[str, Any] = {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+        }
+        if details:
+            payload["details"] = dict(details)
+        self.error = payload
+
+
+@dataclass(slots=True)
 class TtsChunkEvent(BaseConversationEvent):
     chunk: AudioChunk | None = None
     text_segment: str | None = None
@@ -469,6 +537,26 @@ class TurnQueuedEvent(BaseConversationEvent):
         self.queue_size = queue_size
         self.source = source
         self.policy = policy
+
+
+@dataclass(slots=True)
+class TurnAcceptedEvent(BaseConversationEvent):
+    client_turn_id: str = ""
+
+    def __init__(
+        self,
+        session_id: str,
+        client_turn_id: str,
+        *,
+        turn_id: str | None = None,
+    ) -> None:
+        BaseConversationEvent.__init__(
+            self,
+            type="turn.accepted",
+            session_id=session_id,
+            turn_id=turn_id,
+        )
+        self.client_turn_id = client_turn_id
 
 
 @dataclass(slots=True)
@@ -558,6 +646,7 @@ ConversationEvent: TypeAlias = (
     | VadStateEvent
     | SttPartialEvent
     | SttFinalEvent
+    | SttStatusEvent
     | RouteSelectedEvent
     | LlmPhaseEvent
     | LlmReasoningDeltaEvent
@@ -566,9 +655,11 @@ ConversationEvent: TypeAlias = (
     | LlmUsageEvent
     | LlmSummaryEvent
     | LlmCompletedEvent
+    | LlmErrorEvent
     | TtsChunkEvent
     | TtsCompletedEvent
     | ConversationInterruptedEvent
+    | TurnAcceptedEvent
     | TurnQueuedEvent
     | TurnMetricsEvent
     | ErrorEvent

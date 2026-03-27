@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
+import os
 from typing import Any, cast
 
 from open_voice_runtime.audio.preprocessing import (
@@ -36,6 +37,7 @@ class MoonshineSttStream(BaseSttStream):
         self._loop = asyncio.get_running_loop()
         self._queue: asyncio.Queue[SttEvent | Exception | None] = asyncio.Queue()
         self._closed = False
+        self._line_update_interval = _moonshine_update_interval_seconds()
         self._state = self._create_state()
 
     async def push_audio(self, chunk: AudioChunk) -> None:
@@ -131,7 +133,7 @@ class MoonshineSttStream(BaseSttStream):
                 err = RuntimeError(str(event.error))
                 loop.call_soon_threadsafe(queue.put_nowait, err)
 
-        stream = self._transcriber.create_stream(update_interval=0.25)
+        stream = self._transcriber.create_stream(update_interval=self._line_update_interval)
         stream.add_listener(Listener())
         stream.start()
         return MoonshineStreamState(stream=stream, queue=self._queue)
@@ -204,3 +206,15 @@ class MoonshineSttEngine(BaseSttEngine):
             language=request.config.language,
             duration_ms=None,
         )
+
+
+def _moonshine_update_interval_seconds() -> float:
+    raw = os.getenv("OPEN_VOICE_MOONSHINE_UPDATE_INTERVAL_MS")
+    if raw is None:
+        return 0.06
+    try:
+        value_ms = float(raw)
+    except (TypeError, ValueError):
+        return 0.06
+    value_ms = max(20.0, min(250.0, value_ms))
+    return value_ms / 1000.0

@@ -113,7 +113,7 @@ export class OpenVoiceWebClient {
     }
 
     throw new Error(
-      `Runtime realtime audio is unavailable (${missing.join(", ")}). Install runtime audio dependencies (for example: moonshine-voice and silero-vad) and restart backend.`,
+      `Runtime realtime audio is unavailable (${missing.join(", ")}). Install runtime audio dependencies for your configured engines (for example: moonshine-voice + silero-vad, or Parakeet + silero-vad) and restart backend.`,
     )
   }
 }

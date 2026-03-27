@@ -7,6 +7,26 @@ FRONTEND_DIR="${SCRIPT_DIR}/frontend"
 BACKEND_REQS="${SCRIPT_DIR}/backend/requirements.txt"
 BACKEND_VENV="${SCRIPT_DIR}/backend/.venv"
 BACKEND_PYTHON="${BACKEND_VENV}/bin/python"
+DEMO_ENV="${SCRIPT_DIR}/.env"
+DEMO_ENV_LOCAL="${SCRIPT_DIR}/.env.local"
+DEFAULT_ROUTE_TARGETS='[{"llm_engine_id":"opencode","provider":"doai","model":"openai-gpt-oss-120b","profile_id":"trivial_route"},{"llm_engine_id":"opencode","provider":"doai","model":"openai-gpt-oss-120b","profile_id":"simple_route"},{"llm_engine_id":"opencode","provider":"doai","model":"openai-gpt-oss-120b","profile_id":"moderate_route"},{"llm_engine_id":"opencode","provider":"doai","model":"openai-gpt-oss-120b","profile_id":"complex_route"},{"llm_engine_id":"opencode","provider":"doai","model":"openai-gpt-oss-120b","profile_id":"expert_route"}]'
+
+load_env_file() {
+  local env_file="$1"
+  if [ -f "${env_file}" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "${env_file}"
+    set +a
+  fi
+}
+
+load_env_file "${DEMO_ENV}"
+load_env_file "${DEMO_ENV_LOCAL}"
+
+if [ -z "${OPEN_VOICE_ROUTE_TARGETS:-}" ]; then
+  export OPEN_VOICE_ROUTE_TARGETS="${DEFAULT_ROUTE_TARGETS}"
+fi
 
 if ! command -v python3 >/dev/null 2>&1; then
   printf 'python3 is required to run demo backend.\n' >&2

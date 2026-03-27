@@ -28,39 +28,56 @@ export function extractTtsChunk(event: ConversationEvent): TtsChunk | null {
 
 export class SessionAudioController {
   private readonly gate = new GenerationEventGate()
+  private eventChain: Promise<void> = Promise.resolve()
 
   constructor(private readonly output: AudioOutputAdapter) {}
+
+  private enqueue(operation: () => Promise<void>): Promise<void> {
+    const run = this.eventChain.then(operation, operation)
+    this.eventChain = run.catch(() => undefined)
+    return run
+  }
 
   shouldAccept(event: ConversationEvent): boolean {
     return this.gate.shouldAccept(event)
   }
 
   async onEvent(event: ConversationEvent): Promise<void> {
-    if (!this.gate.shouldAccept(event)) {
-      return
-    }
+    return this.enqueue(async () => {
+      if (!this.gate.shouldAccept(event)) {
+        return
+      }
 
-    this.gate.observe(event)
+      this.gate.observe(event)
 
-    if (event.type === "conversation.interrupted") {
-      await this.output.flush("conversation.interrupted")
-      return
-    }
+      if (event.type === "conversation.interrupted") {
+        await this.output.flush("conversation.interrupted")
+        return
+      }
 
-    const ttsChunk = extractTtsChunk(event)
-    if (ttsChunk) {
-      await this.output.appendTtsChunk(ttsChunk)
-      return
-    }
+      if (event.type === "llm.error") {
+        this.gate.rejectActiveGeneration()
+        await this.output.flush("llm.error")
+        return
+      }
 
-    if (event.type === "tts.completed") {
-      return
-    }
+      const ttsChunk = extractTtsChunk(event)
+      if (ttsChunk) {
+        await this.output.appendTtsChunk(ttsChunk)
+        return
+      }
+
+      if (event.type === "tts.completed") {
+        return
+      }
+    })
   }
 
   async interrupt(reason?: string): Promise<void> {
     this.gate.rejectActiveGeneration()
-    await this.output.flush(reason ?? "interrupt")
+    await this.enqueue(async () => {
+      await this.output.flush(reason ?? "interrupt")
+    })
   }
 
   reset(): void {
