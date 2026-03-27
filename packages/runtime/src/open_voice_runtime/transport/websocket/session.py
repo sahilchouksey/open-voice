@@ -535,6 +535,19 @@ class RealtimeConversationSession:
                 if previous_text != latest_final_text:
                     self._last_stt_final_text[state.session_id] = latest_final_text
 
+        # If a client-side commit is already in progress, treat newly observed
+        # realtime STT finals as commit candidates immediately so we do not wait
+        # for an additional commit timeout window.
+        if (
+            not has_new_stt_final
+            and self._stt_commit_started_at.get(state.session_id) is not None
+            and any(
+                event.kind is SttEventKind.FINAL and bool((event.text or "").strip())
+                for event in stt_events
+            )
+        ):
+            has_new_stt_final = True
+
         if (
             has_new_stt_final
             and not interrupted_on_this_append

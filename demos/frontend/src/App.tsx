@@ -96,9 +96,9 @@ const DEMO_UI_VAD_PROBABILITY_THRESHOLD = 0.6
 const DEMO_INTERRUPT_COOLDOWN_MS = 60
 const DEMO_INTERRUPT_MIN_DURATION_SECONDS = 0.03
 const DEMO_INTERRUPT_MIN_WORDS = 1
-const DEMO_LOCAL_BARGE_IN_PEAK_THRESHOLD = 0.07
-const DEMO_LOCAL_BARGE_IN_CONSECUTIVE_FRAMES = 2
-const DEMO_LOCAL_BARGE_IN_COOLDOWN_MS = 280
+const DEMO_LOCAL_BARGE_IN_PEAK_THRESHOLD = 0.12
+const DEMO_LOCAL_BARGE_IN_CONSECUTIVE_FRAMES = 5
+const DEMO_LOCAL_BARGE_IN_COOLDOWN_MS = 700
 const DEMO_STT_TRANSCRIPT_TIMEOUT_MS = 1200
 const DEMO_MIN_SILENCE_DURATION_MS = 850
 const DEMO_POST_RELEASE_PROCESSING_GRACE_MS = 1400
@@ -118,7 +118,7 @@ const DEMO_PHASE_DEBOUNCE_MS = 180
 const DEMO_FORCE_SEND_NOW_DEFAULT = true
 const DEMO_DISABLE_STT_STABILIZATION = false
 
-const DEMO_SEND_NOW_RUNTIME_OWNED_COMMIT = false
+const DEMO_SEND_NOW_RUNTIME_OWNED_COMMIT = true
 const MINIMAL_CAPTIONS_STORAGE_KEY = "openvoice.minimal.captions"
 const MINIMAL_DETAIL_STORAGE_KEY = "openvoice.minimal.detail"
 const FILLER_PARTIAL_TOKENS = new Set([
@@ -530,7 +530,7 @@ function envFlag(value: unknown, defaultValue = false): boolean {
 
 const FRONTEND_DIAGNOSTICS_ENABLED = envFlag(
   import.meta.env.VITE_OPEN_VOICE_FRONTEND_DIAGNOSTICS,
-  false,
+  import.meta.env.DEV,
 )
 
 function isLoopbackHost(hostname: string): boolean {
@@ -1223,10 +1223,18 @@ export function App() {
         if (eventGenerationId) {
           activeGenerationIdRef.current = eventGenerationId
         }
-        setTurnPhaseStable("agent_speaking")
-        pendingSpeechAfterThinkingRef.current = false
-        setPendingSpeechAfterThinking(false)
-        clearSpeechWatchdog()
+        const hasAudiblePlayback = ttsPlayingRef.current || ttsStreamActiveRef.current
+        if (hasAudiblePlayback) {
+          setTurnPhaseStable("agent_speaking")
+          pendingSpeechAfterThinkingRef.current = false
+          setPendingSpeechAfterThinking(false)
+          clearSpeechWatchdog()
+        } else {
+          setTurnPhaseStable("processing")
+          pendingSpeechAfterThinkingRef.current = true
+          setPendingSpeechAfterThinking(true)
+          startSpeechWatchdog()
+        }
       }
       else if (event.status === "listening" || event.status === "ready") {
         const nextPhase = (() => {
@@ -1345,6 +1353,7 @@ export function App() {
     if (event.type === "stt.partial") {
       const partialTurnId = event.turn_id ?? null
       const partialGenerationId = typeof event.generation_id === "string" ? event.generation_id : null
+      const bypassTrackGuards = effectiveQueuePolicy === "send_now"
       const canRotateSttTrack =
         !pendingTurnStartedAtRef.current
         && (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready")
@@ -1360,7 +1369,7 @@ export function App() {
         && partialTurnId
         && partialTurnId !== sttCurrentTurnIdRef.current
       ) {
-        if (!canRotateSttTrack) {
+        if (!canRotateSttTrack && !bypassTrackGuards) {
           return
         }
         sttCurrentTurnIdRef.current = null
@@ -1371,7 +1380,7 @@ export function App() {
         && partialGenerationId
         && partialGenerationId !== sttCurrentGenerationIdRef.current
       ) {
-        if (!canRotateSttTrack) {
+        if (!canRotateSttTrack && !bypassTrackGuards) {
           return
         }
         sttCurrentTurnIdRef.current = null
@@ -1432,6 +1441,7 @@ export function App() {
       }
       const incomingGenerationId = typeof event.generation_id === "string" ? event.generation_id : null
       const incomingTurnId = event.turn_id ?? null
+      const bypassTrackGuards = effectiveQueuePolicy === "send_now"
       const canRotateSttTrack =
         !pendingTurnStartedAtRef.current
         && (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready")
@@ -1444,7 +1454,7 @@ export function App() {
         && incomingTurnId
         && incomingTurnId !== sttCurrentTurnIdRef.current
       ) {
-        if (!canRotateSttTrack) {
+        if (!canRotateSttTrack && !bypassTrackGuards) {
           return
         }
         sttCurrentTurnIdRef.current = null
@@ -1455,7 +1465,7 @@ export function App() {
         && incomingGenerationId
         && incomingGenerationId !== sttCurrentGenerationIdRef.current
       ) {
-        if (!canRotateSttTrack) {
+        if (!canRotateSttTrack && !bypassTrackGuards) {
           return
         }
         sttCurrentTurnIdRef.current = null
@@ -1480,7 +1490,8 @@ export function App() {
       setRouteModel(null)
       setTurnPhaseStable("processing")
       const dedupeKey = `${event.turn_id ?? "-"}:${event.text}`
-      if (dedupeKey !== seenUserFinalRef.current && event.text.trim()) {
+      const isCommittedUserFinal = typeof event.generation_id === "string" && event.generation_id.length > 0
+      if (isCommittedUserFinal && dedupeKey !== seenUserFinalRef.current && event.text.trim()) {
         seenUserFinalRef.current = dedupeKey
         if (mode !== "minimal") {
           setTranscript((prev) => {
@@ -1699,6 +1710,9 @@ export function App() {
       }
       thinkingPlayerRef.current?.stop()
       setLlmThinkingActive(false)
+      pendingSpeechAfterThinkingRef.current = false
+      setPendingSpeechAfterThinking(false)
+      clearSpeechWatchdog()
       ttsStreamActiveRef.current = true
       setTtsStreamActive(true)
       setTurnPhaseStable("agent_speaking")
@@ -1801,15 +1815,13 @@ export function App() {
           return
         }
 
-        const agentCurrentlySpeaking =
+        const agentAudioPlaying =
           turnPhaseRef.current === "agent_speaking"
           || sessionStatusRef.current === "speaking"
-          || sessionStatusRef.current === "thinking"
           || ttsPlayingRef.current
           || ttsStreamActiveRef.current
-          || llmThinkingActiveRef.current
 
-        if (!agentCurrentlySpeaking || interruptionInFlightRef.current) {
+        if (!agentAudioPlaying || interruptionInFlightRef.current) {
           localBargeInFramesRef.current = 0
           return
         }
