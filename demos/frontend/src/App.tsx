@@ -96,14 +96,19 @@ const DEMO_UI_VAD_PROBABILITY_THRESHOLD = 0.6
 const DEMO_INTERRUPT_COOLDOWN_MS = 60
 const DEMO_INTERRUPT_MIN_DURATION_SECONDS = 0.03
 const DEMO_INTERRUPT_MIN_WORDS = 1
-const DEMO_LOCAL_BARGE_IN_PEAK_THRESHOLD = 0.12
-const DEMO_LOCAL_BARGE_IN_CONSECUTIVE_FRAMES = 5
-const DEMO_LOCAL_BARGE_IN_COOLDOWN_MS = 700
+const DEMO_LOCAL_BARGE_IN_PEAK_THRESHOLD = 0.15
+const DEMO_LOCAL_BARGE_IN_CONSECUTIVE_FRAMES = 8
+const DEMO_LOCAL_BARGE_IN_COOLDOWN_MS = 1000
+const DEMO_LOCAL_BARGE_IN_FLOOR_ALPHA = 0.08
+const DEMO_LOCAL_BARGE_IN_FLOOR_MULTIPLIER = 2.2
+const DEMO_LOCAL_BARGE_IN_FLOOR_BIAS = 0.04
+const DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT = false
+const DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT = false
 const DEMO_STT_TRANSCRIPT_TIMEOUT_MS = 1200
 const DEMO_MIN_SILENCE_DURATION_MS = 850
 const DEMO_POST_RELEASE_PROCESSING_GRACE_MS = 1400
 const DEMO_IDLE_TRANSITION_DELAY_MS = 220
-const DEMO_SLOW_STT_STABILIZATION_MS = 320
+const DEMO_SLOW_STT_STABILIZATION_MS = 160
 const DEMO_MIC_STOP_COMMIT_GRACE_MS = 900
 const DEMO_AUTO_COMMIT_MIN_INTERVAL_MS = 400
 const DEMO_ROUTER_TIMEOUT_MS = 7000
@@ -112,11 +117,12 @@ const DEMO_PENDING_TURN_SLOW_MS = 2000
 const DEMO_PENDING_TURN_DEGRADED_MS = 8000
 const DEMO_PENDING_TURN_TIMEOUT_MS = 25000
 const DEMO_GENERATION_WATCHDOG_TIMEOUT_MS = 30000
-const DEMO_STT_FINAL_TIMEOUT_MS = 2600
+const DEMO_STT_FINAL_TIMEOUT_MS = 1200
 const DEMO_ROUTER_MODE: "disabled" | "fallback_only" | "enabled" = "fallback_only"
 const DEMO_PHASE_DEBOUNCE_MS = 180
 const DEMO_FORCE_SEND_NOW_DEFAULT = true
 const DEMO_DISABLE_STT_STABILIZATION = false
+const DEMO_EVENT_TRACE_MAX_ITEMS = 220
 
 const DEMO_SEND_NOW_RUNTIME_OWNED_COMMIT = true
 const MINIMAL_CAPTIONS_STORAGE_KEY = "openvoice.minimal.captions"
@@ -563,6 +569,31 @@ function parseModeValue(value: string | null): Mode | null {
   return null
 }
 
+function formatEventForPanel(event: ConversationEvent): string {
+  if (event.type !== "tts.chunk") {
+    return JSON.stringify(event, null, 2)
+  }
+
+  const chunk = event.chunk as {
+    data_base64?: unknown
+    encoding?: unknown
+    sample_rate_hz?: unknown
+    channels?: unknown
+    sequence?: unknown
+    duration_ms?: unknown
+  }
+  const raw = typeof chunk.data_base64 === "string" ? chunk.data_base64 : null
+  const payload = {
+    ...event,
+    chunk: {
+      ...chunk,
+      data_base64: raw ? "[omitted]" : chunk.data_base64,
+      data_base64_bytes: raw ? Math.floor((raw.length * 3) / 4) : undefined,
+    },
+  }
+  return JSON.stringify(payload, null, 2)
+}
+
 function resolveInitialMode(): Mode {
   const params = new URLSearchParams(location.search)
   return parseModeValue(params.get("tab")) ?? parseModeValue(params.get("mode")) ?? "detailed"
@@ -687,6 +718,7 @@ export function App() {
   const sttCurrentGenerationIdRef = useRef<string | null>(null)
   const localBargeInFramesRef = useRef(0)
   const localBargeInCooldownUntilRef = useRef(0)
+  const localBargeInNoiseFloorRef = useRef(0)
 
   const canConnect = !sessionRef.current
   const micButtonVisualState: "off" | "on" | "hold" = isMicHoldActive
@@ -1150,7 +1182,8 @@ export function App() {
     if (event.type === "vad.state" && event.kind === "inference") {
       return
     }
-    setEvents((prev) => [...prev.slice(-399), JSON.stringify(event, null, 2)])
+    const rendered = formatEventForPanel(event)
+    setEvents((prev) => [...prev.slice(-(DEMO_EVENT_TRACE_MAX_ITEMS - 1)), rendered])
   }, [mode])
 
   const handleEvent = useCallback(async (event: ConversationEvent) => {
@@ -1423,6 +1456,7 @@ export function App() {
 
       if (
         shouldAutoBargeInterrupt
+        && DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT
         && agentCurrentlySpeaking
         && !interruptionInFlightRef.current
         && isInterruptWorthyPartial(partialText)
@@ -1812,26 +1846,42 @@ export function App() {
 
         if (effectiveQueuePolicy !== "send_now") {
           localBargeInFramesRef.current = 0
+          localBargeInNoiseFloorRef.current = 0
           return
         }
 
-        const agentAudioPlaying =
-          turnPhaseRef.current === "agent_speaking"
-          || sessionStatusRef.current === "speaking"
-          || ttsPlayingRef.current
-          || ttsStreamActiveRef.current
+        const agentAudioPlaying = ttsPlayingRef.current || ttsStreamActiveRef.current
 
         if (!agentAudioPlaying || interruptionInFlightRef.current) {
           localBargeInFramesRef.current = 0
+          localBargeInNoiseFloorRef.current = normalizedLevel
           return
         }
+
+        const currentFloor = localBargeInNoiseFloorRef.current || normalizedLevel
+        const nextFloor =
+          currentFloor * (1 - DEMO_LOCAL_BARGE_IN_FLOOR_ALPHA)
+          + normalizedLevel * DEMO_LOCAL_BARGE_IN_FLOOR_ALPHA
+        localBargeInNoiseFloorRef.current = nextFloor
+        const dynamicThreshold = Math.min(
+          0.65,
+          Math.max(
+            DEMO_LOCAL_BARGE_IN_PEAK_THRESHOLD,
+            nextFloor * DEMO_LOCAL_BARGE_IN_FLOOR_MULTIPLIER + DEMO_LOCAL_BARGE_IN_FLOOR_BIAS,
+          ),
+        )
 
         const now = Date.now()
         if (now < localBargeInCooldownUntilRef.current) {
           return
         }
 
-        if (normalizedLevel >= DEMO_LOCAL_BARGE_IN_PEAK_THRESHOLD) {
+        if (!DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT) {
+          localBargeInFramesRef.current = 0
+          return
+        }
+
+        if (normalizedLevel >= dynamicThreshold) {
           localBargeInFramesRef.current += 1
           if (localBargeInFramesRef.current >= DEMO_LOCAL_BARGE_IN_CONSECUTIVE_FRAMES) {
             traceReporterRef.current?.trackLocal(
@@ -1839,6 +1889,8 @@ export function App() {
               {
                 session_id: sessionRef.current?.sessionId ?? null,
                 peak: Number(normalizedLevel.toFixed(3)),
+                floor: Number(nextFloor.toFixed(3)),
+                threshold: Number(dynamicThreshold.toFixed(3)),
               },
               "ui.action",
             )
@@ -1881,6 +1933,7 @@ export function App() {
     setMicBands(zeroBands())
     localBargeInFramesRef.current = 0
     localBargeInCooldownUntilRef.current = 0
+    localBargeInNoiseFloorRef.current = 0
 
     if (!mic) {
       return
@@ -2049,6 +2102,7 @@ export function App() {
     rejectedGenerationIdsRef.current.clear()
     localBargeInFramesRef.current = 0
     localBargeInCooldownUntilRef.current = 0
+    localBargeInNoiseFloorRef.current = 0
     await traceReporterRef.current?.flush(false)
     traceReporterRef.current?.stop()
     traceReporterRef.current = null

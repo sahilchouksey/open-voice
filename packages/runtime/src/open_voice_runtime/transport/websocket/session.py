@@ -535,19 +535,6 @@ class RealtimeConversationSession:
                 if previous_text != latest_final_text:
                     self._last_stt_final_text[state.session_id] = latest_final_text
 
-        # If a client-side commit is already in progress, treat newly observed
-        # realtime STT finals as commit candidates immediately so we do not wait
-        # for an additional commit timeout window.
-        if (
-            not has_new_stt_final
-            and self._stt_commit_started_at.get(state.session_id) is not None
-            and any(
-                event.kind is SttEventKind.FINAL and bool((event.text or "").strip())
-                for event in stt_events
-            )
-        ):
-            has_new_stt_final = True
-
         if (
             has_new_stt_final
             and not interrupted_on_this_append
@@ -1551,6 +1538,9 @@ class RealtimeConversationSession:
             # Keep the active STT stream for runtime barge-ins so pending
             # interrupting speech can still finalize into the replacement turn.
             await self._reset_vad_stream(state.session_id)
+            # Also reset STT stream to avoid carrying stale decoder state across
+            # multiple barge-ins, which can delay/merge subsequent turns.
+            await self._reset_stt_stream(state.session_id)
         else:
             # For manual interrupts, clear pending STT data to avoid stale turns.
             await self._drain_and_discard_stt_events(state.session_id)
