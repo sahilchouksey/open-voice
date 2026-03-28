@@ -101,8 +101,8 @@ TURN_QUEUE_POLICY_INJECT_NEXT_LOOP = "inject_next_loop"
 
 
 DEFAULT_STT_FINAL_TIMEOUT_MS = 1200
-DEFAULT_LLM_FIRST_DELTA_TIMEOUT_MS = 30000
-DEFAULT_LLM_TOTAL_TIMEOUT_MS = 25000
+DEFAULT_LLM_FIRST_DELTA_TIMEOUT_MS = 45000
+DEFAULT_LLM_TOTAL_TIMEOUT_MS = 90000
 DEFAULT_STT_STABILIZATION_MS = 0
 LLM_RAW_ERROR_PREFIX = "I hit an error: "
 LLM_RAW_ERROR_MAX_CHARS = 220
@@ -1728,11 +1728,77 @@ class RealtimeConversationSession:
     ) -> list[ConversationEvent]:
         state = await self._sessions.get(message.session_id)
 
+        queue_policy = _turn_queue_policy(state)
         if state.status in {
             SessionStatus.TRANSCRIBING,
             SessionStatus.THINKING,
             SessionStatus.SPEAKING,
         }:
+            if queue_policy == TURN_QUEUE_POLICY_SEND_NOW:
+                interrupt_events = await self._interrupt(
+                    ConversationInterruptMessage(
+                        session_id=message.session_id,
+                        reason="send_now",
+                    )
+                )
+                state = await self._sessions.get(message.session_id)
+                if state.active_turn_id is None:
+                    turn_id = state.begin_turn()
+                    self._turn_start_times[state.session_id] = asyncio.get_running_loop().time()
+                else:
+                    turn_id = state.active_turn_id
+
+                route_events, decision = await self._route_text(state, turn_id, message.user_text)
+                thinking_status_events = await self._transition_session(
+                    state,
+                    SessionStatus.THINKING,
+                    "agent.generate_reply",
+                )
+
+                if emit is not None:
+                    self._trace_start(state)
+                    generation_id = self._new_generation_id()
+                    _set_generation_for_events(interrupt_events, generation_id)
+                    _set_generation_for_events(route_events, generation_id)
+                    _set_generation_for_events(thinking_status_events, generation_id)
+                    await _emit_conversation_events(emit, interrupt_events)
+                    await _emit_conversation_events(emit, route_events)
+                    await _emit_conversation_events(emit, thinking_status_events)
+                    await self._start_response_task(
+                        state,
+                        turn_id,
+                        message.user_text,
+                        decision,
+                        emit,
+                        generation_id=generation_id,
+                    )
+                    return []
+
+                llm_raw, llm_events, assistant_text = await self._generate_llm_response(
+                    state,
+                    turn_id,
+                    message.user_text,
+                    decision,
+                )
+                tts_events = await self._generate_tts_response(
+                    state,
+                    turn_id,
+                    llm_raw,
+                    assistant_text,
+                )
+                listening_status_events = await self._transition_session(
+                    state, SessionStatus.LISTENING, "agent.generate_reply.complete"
+                )
+                state.complete_turn(user_text=message.user_text, assistant_text=assistant_text)
+                return [
+                    *interrupt_events,
+                    *route_events,
+                    *thinking_status_events,
+                    *llm_events,
+                    *tts_events,
+                    *listening_status_events,
+                ]
+
             queue_event = self._queue_turn(
                 state,
                 text=message.user_text,
