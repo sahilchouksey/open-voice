@@ -2017,7 +2017,7 @@ export function App() {
       if (
         shouldAutoBargeInterrupt
         && DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT
-        && agentCurrentlySpeaking
+        && (ttsPlayingRef.current || ttsStreamActiveRef.current)
         && !interruptionInFlightRef.current
         && isInterruptWorthyPartial(partialText)
       ) {
@@ -2090,7 +2090,7 @@ export function App() {
           shouldAutoBargeInterrupt
           && DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT
           && !interruptionInFlightRef.current
-          && (ttsPlayingRef.current || ttsStreamActiveRef.current || llmThinkingActiveRef.current)
+          && (ttsPlayingRef.current || ttsStreamActiveRef.current)
           && isInterruptWorthyPartial(event.text)
         ) {
           triggerImmediateInterrupt("stt_partial")
