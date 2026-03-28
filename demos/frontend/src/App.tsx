@@ -5,6 +5,7 @@ import {
   toRuntimeConfigPayload,
   type AudioOutputAdapter,
   type ConversationEvent,
+  type SessionHistoryEntry,
   type RuntimeSessionConfig,
   type TtsChunk,
   type WebVoiceSession,
@@ -21,6 +22,18 @@ const MINIMAL_VISUALIZER_STYLE: "radial" | "grid" = "grid"
 interface TranscriptItem {
   role: "user" | "assistant"
   text: string
+}
+
+interface SessionConversationHistory {
+  sessionId: string
+  title: string
+  status: string
+  updatedAt: string
+  turnCount: number
+  completedTurnCount: number
+  lastUserText: string | null
+  lastAssistantText: string | null
+  transcript: TranscriptItem[]
 }
 
 interface EngineReadiness {
@@ -97,13 +110,14 @@ const DEMO_INTERRUPT_COOLDOWN_MS = 60
 const DEMO_INTERRUPT_MIN_DURATION_SECONDS = 0.03
 const DEMO_INTERRUPT_MIN_WORDS = 1
 const DEMO_LOCAL_BARGE_IN_PEAK_THRESHOLD = 0.15
-const DEMO_LOCAL_BARGE_IN_CONSECUTIVE_FRAMES = 8
+const DEMO_LOCAL_BARGE_IN_CONSECUTIVE_FRAMES = 12
 const DEMO_LOCAL_BARGE_IN_COOLDOWN_MS = 1000
 const DEMO_LOCAL_BARGE_IN_FLOOR_ALPHA = 0.08
 const DEMO_LOCAL_BARGE_IN_FLOOR_MULTIPLIER = 2.2
 const DEMO_LOCAL_BARGE_IN_FLOOR_BIAS = 0.04
-const DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT = false
+const DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT = true
 const DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT = false
+const DEMO_ENABLE_VAD_AUTO_INTERRUPT = false
 const DEMO_STT_TRANSCRIPT_TIMEOUT_MS = 1200
 const DEMO_MIN_SILENCE_DURATION_MS = 850
 const DEMO_POST_RELEASE_PROCESSING_GRACE_MS = 1400
@@ -127,6 +141,10 @@ const DEMO_EVENT_TRACE_MAX_ITEMS = 220
 const DEMO_SEND_NOW_RUNTIME_OWNED_COMMIT = true
 const MINIMAL_CAPTIONS_STORAGE_KEY = "openvoice.minimal.captions"
 const MINIMAL_DETAIL_STORAGE_KEY = "openvoice.minimal.detail"
+const MINIMAL_CHAT_HISTORY_STORAGE_KEY = "openvoice.minimal.chat_history"
+const LOCAL_SESSION_HISTORY_STORAGE_KEY = "openvoice.session_history.v1"
+const SESSION_HISTORY_LIMIT = 5
+const SESSION_TRANSCRIPT_LIMIT = 50
 const FILLER_PARTIAL_TOKENS = new Set([
   "uh",
   "um",
@@ -514,6 +532,9 @@ const OPEN_VOICE_SYSTEM_PROMPT = [
   "For current events or other time-sensitive questions, always search the web before answering.",
   "Never guess or rely on stale memory for news, politics, markets, sports, weather, or other live facts.",
   "Use tools when needed, but never expose internal routing, model, or tool implementation details.",
+  "Never speak or read full URLs out loud.",
+  "If referencing a source in speech, say only the domain name.",
+  "Never include protocol path query fragments tracking parameters or full link strings in spoken output.",
 ].join(" ")
 
 function envFlag(value: unknown, defaultValue = false): boolean {
@@ -627,6 +648,146 @@ function resolveStoredFlag(storageKey: string, fallback: boolean): boolean {
   return fallback
 }
 
+function trimText(text: string, maxChars = 160): string {
+  const normalized = text.trim().replace(/\s+/g, " ")
+  if (normalized.length <= maxChars) {
+    return normalized
+  }
+  return `${normalized.slice(0, maxChars - 3).trimEnd()}...`
+}
+
+function makeHistoryTitle(item: SessionHistoryEntry): string {
+  const fromLastUser = typeof item.last_user_text === "string" ? trimText(item.last_user_text, 80) : ""
+  const fromTitle = typeof item.title === "string" ? item.title.trim() : ""
+  if (fromLastUser) return fromLastUser
+  if (fromTitle) return fromTitle
+  return item.session_id.slice(0, 8)
+}
+
+function buildSessionHistoryEntry(item: SessionHistoryEntry): SessionConversationHistory {
+  return {
+    sessionId: item.session_id,
+    title: makeHistoryTitle(item),
+    status: item.status,
+    updatedAt: item.updated_at,
+    turnCount: item.turn_count,
+    completedTurnCount: item.completed_turn_count,
+    lastUserText: typeof item.last_user_text === "string" ? item.last_user_text : null,
+    lastAssistantText: typeof item.last_assistant_text === "string" ? item.last_assistant_text : null,
+    transcript: [],
+  }
+}
+
+function transcriptSummaryText(item: TranscriptItem): string {
+  return trimText(item.text, 140)
+}
+
+function readStoredSessionHistory(): SessionConversationHistory[] {
+  const raw = localStorage.getItem(LOCAL_SESSION_HISTORY_STORAGE_KEY)
+  if (!raw) {
+    return []
+  }
+
+  try {
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+
+    const rows: SessionConversationHistory[] = []
+    for (const item of parsed) {
+      if (!item || typeof item !== "object") {
+        continue
+      }
+      const sessionId = typeof item.sessionId === "string" ? item.sessionId : ""
+      if (!sessionId) {
+        continue
+      }
+      const transcript = Array.isArray((item as { transcript?: unknown }).transcript)
+        ? (item as { transcript: unknown[] }).transcript
+            .map((entry) => {
+              if (!entry || typeof entry !== "object") return null
+              const role = (entry as { role?: unknown }).role
+              const text = (entry as { text?: unknown }).text
+              if ((role === "user" || role === "assistant") && typeof text === "string") {
+                return { role, text } as TranscriptItem
+              }
+              return null
+            })
+            .filter((entry): entry is TranscriptItem => entry !== null)
+        : []
+
+      rows.push({
+        sessionId,
+        title: typeof item.title === "string" && item.title.trim() ? item.title : `Session ${sessionId.slice(0, 8)}`,
+        status: typeof item.status === "string" ? item.status : "unknown",
+        updatedAt: typeof item.updatedAt === "string" ? item.updatedAt : new Date(0).toISOString(),
+        turnCount: typeof item.turnCount === "number" ? item.turnCount : 0,
+        completedTurnCount: typeof item.completedTurnCount === "number" ? item.completedTurnCount : 0,
+        lastUserText: typeof item.lastUserText === "string" ? item.lastUserText : null,
+        lastAssistantText: typeof item.lastAssistantText === "string" ? item.lastAssistantText : null,
+        transcript,
+      })
+    }
+
+    rows.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    return rows.slice(0, SESSION_HISTORY_LIMIT)
+  } catch {
+    return []
+  }
+}
+
+function writeStoredSessionHistory(items: SessionConversationHistory[]): void {
+  const payload = items.slice(0, SESSION_HISTORY_LIMIT)
+  localStorage.setItem(LOCAL_SESSION_HISTORY_STORAGE_KEY, JSON.stringify(payload))
+}
+
+function dedupeAndSortHistory(items: SessionConversationHistory[]): SessionConversationHistory[] {
+  const bySessionId = new Map<string, SessionConversationHistory>()
+  for (const item of items) {
+    const existing = bySessionId.get(item.sessionId)
+    if (!existing) {
+      bySessionId.set(item.sessionId, item)
+      continue
+    }
+    const keepIncoming = item.updatedAt.localeCompare(existing.updatedAt) >= 0
+    bySessionId.set(item.sessionId, keepIncoming ? item : existing)
+  }
+  return Array.from(bySessionId.values())
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .slice(0, SESSION_HISTORY_LIMIT)
+}
+
+function latestTranscriptByRole(transcript: TranscriptItem[], role: TranscriptItem["role"]): string | null {
+  for (let index = transcript.length - 1; index >= 0; index -= 1) {
+    const item = transcript[index]
+    if (item.role === role && item.text.trim()) {
+      return item.text
+    }
+  }
+  return null
+}
+
+function transcriptFromHistoryTurns(turns: Array<{
+  turn_id: string
+  user_text?: string | null
+  assistant_text?: string | null
+}>): TranscriptItem[] {
+  const transcript: TranscriptItem[] = []
+  for (const turn of turns) {
+    if (typeof turn.user_text === "string" && turn.user_text.trim()) {
+      transcript.push({ role: "user", text: turn.user_text })
+    }
+    if (typeof turn.assistant_text === "string" && turn.assistant_text.trim()) {
+      transcript.push({ role: "assistant", text: turn.assistant_text })
+    }
+  }
+  if (transcript.length <= SESSION_TRANSCRIPT_LIMIT) {
+    return transcript
+  }
+  return transcript.slice(-SESSION_TRANSCRIPT_LIMIT)
+}
+
 export function App() {
   const [mode, setMode] = useState<Mode>(resolveInitialMode)
   const [baseUrl, setBaseUrl] = useState(resolveInitialRuntimeBaseUrl)
@@ -666,6 +827,16 @@ export function App() {
   const [minimalDetailEnabled, setMinimalDetailEnabled] = useState(() =>
     resolveStoredFlag(MINIMAL_DETAIL_STORAGE_KEY, false),
   )
+  const [minimalChatHistoryEnabled, setMinimalChatHistoryEnabled] = useState(() =>
+    resolveStoredFlag(MINIMAL_CHAT_HISTORY_STORAGE_KEY, true),
+  )
+  const [historySidebarOpen, setHistorySidebarOpen] = useState(false)
+  const [sessionHistory, setSessionHistory] = useState<SessionConversationHistory[]>(readStoredSessionHistory)
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyError, setHistoryError] = useState("")
+  const [historyEndpointSupported, setHistoryEndpointSupported] = useState(true)
+  const [selectedHistorySessionId, setSelectedHistorySessionId] = useState<string | null>(null)
+  const [isSwitchingSession, setIsSwitchingSession] = useState(false)
   const [lastError, setLastError] = useState("")
   const [engineReadiness, setEngineReadiness] = useState<EngineReadiness>({
     checked: false,
@@ -710,8 +881,13 @@ export function App() {
   const sessionStatusRef = useRef(sessionStatus)
   const turnPhaseRef = useRef<TurnPhase>(turnPhase)
   const traceReporterRef = useRef<FrontendTraceReporter | null>(null)
+  const disconnectForCleanupRef = useRef<(() => Promise<void>) | null>(null)
   const minimalSettingsRef = useRef<HTMLDivElement | null>(null)
+  const historySidebarRef = useRef<HTMLDivElement | null>(null)
   const llmResponseTextRef = useRef("")
+  const transcriptRef = useRef<TranscriptItem[]>([])
+  const historyTranscriptRequestedRef = useRef<Set<string>>(new Set())
+  const requestedSessionLoadAttemptRef = useRef<string | null>(null)
   const turnPhaseLastSetAtRef = useRef(0)
   const turnPhaseStickyUntilRef = useRef(0)
   const sttCurrentTurnIdRef = useRef<string | null>(null)
@@ -719,6 +895,7 @@ export function App() {
   const localBargeInFramesRef = useRef(0)
   const localBargeInCooldownUntilRef = useRef(0)
   const localBargeInNoiseFloorRef = useRef(0)
+  const allowAutoInterruptUntilRef = useRef(0)
 
   const canConnect = !sessionRef.current
   const micButtonVisualState: "off" | "on" | "hold" = isMicHoldActive
@@ -752,6 +929,208 @@ export function App() {
     if (turnPhase === "user_speaking") return "listening"
     return sessionStatus
   }, [llmThinkingActive, sessionStatus, turnPhase])
+
+  const refreshSessionHistory = useCallback(async (opts?: { preserveError?: boolean }) => {
+    const runtimeBaseUrl = baseUrl.trim()
+    if (!historyEndpointSupported) {
+      setHistoryLoading(false)
+      return
+    }
+    if (!runtimeBaseUrl) {
+      historyTranscriptRequestedRef.current.clear()
+      setSessionHistory((prev) => (prev.length > 0 ? prev : readStoredSessionHistory()))
+      setHistoryLoading(false)
+      if (!opts?.preserveError) {
+        setHistoryError("")
+      }
+      return
+    }
+
+    setHistoryLoading(true)
+    if (!opts?.preserveError) {
+      setHistoryError("")
+    }
+
+    try {
+      const client = new OpenVoiceWebClient({ baseUrl: runtimeBaseUrl })
+      const rows = await client.http.listSessions(SESSION_HISTORY_LIMIT)
+      setHistoryEndpointSupported(true)
+      const mapped = rows.map(buildSessionHistoryEntry)
+      setSessionHistory((prev) => {
+        const baseRows = dedupeAndSortHistory([...prev, ...mapped])
+        const previousById = new Map(prev.map((item) => [item.sessionId, item]))
+        const incomingIds = new Set(baseRows.map((item) => item.sessionId))
+        for (const existingId of Array.from(historyTranscriptRequestedRef.current)) {
+          if (!incomingIds.has(existingId)) {
+            historyTranscriptRequestedRef.current.delete(existingId)
+          }
+        }
+        return baseRows.map((item) => {
+          const previous = previousById.get(item.sessionId)
+          if (!previous) {
+            return item
+          }
+          if (item.sessionId === sessionRef.current?.sessionId) {
+            return {
+              ...item,
+              transcript: transcriptRef.current,
+            }
+          }
+          return {
+            ...item,
+            transcript: previous.transcript,
+          }
+        })
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (/\b405\b/.test(message)) {
+        setHistoryEndpointSupported(false)
+        const fallback = readStoredSessionHistory()
+        setSessionHistory((prev) => dedupeAndSortHistory([...prev, ...fallback]))
+        setHistoryError(
+          "Live history sync is unavailable on this backend. Showing locally saved chat history.",
+        )
+        setHistoryLoading(false)
+        return
+      }
+      setHistoryError(`Could not load chat history: ${message}`)
+    } finally {
+      setHistoryLoading(false)
+    }
+  }, [baseUrl, historyEndpointSupported])
+
+  const loadSessionTranscript = useCallback(async (
+    targetSessionId: string,
+    opts?: { setActiveTranscript?: boolean },
+  ) => {
+    const runtimeBaseUrl = baseUrl.trim()
+    if (!historyEndpointSupported || !runtimeBaseUrl || !targetSessionId.trim()) {
+      return
+    }
+
+    if (!opts?.setActiveTranscript && historyTranscriptRequestedRef.current.has(targetSessionId)) {
+      return
+    }
+    historyTranscriptRequestedRef.current.add(targetSessionId)
+
+    try {
+      const client = new OpenVoiceWebClient({ baseUrl: runtimeBaseUrl })
+      const turns = await client.http.listSessionTurns(targetSessionId, SESSION_TRANSCRIPT_LIMIT)
+      const nextTranscript = transcriptFromHistoryTurns(turns)
+      if (opts?.setActiveTranscript && targetSessionId === sessionRef.current?.sessionId) {
+        setTranscript(nextTranscript)
+      }
+      setSessionHistory((prev) => prev.map((item) => (
+        item.sessionId === targetSessionId
+          ? { ...item, transcript: nextTranscript }
+          : item
+      )))
+    } catch {
+      // Keep the current history list if transcript fetch fails.
+    }
+  }, [baseUrl, historyEndpointSupported])
+
+  const currentSessionHistory = useMemo(() => {
+    if (!sessionRef.current) {
+      return null
+    }
+    const activeSessionId = sessionRef.current.sessionId
+    const fromList = sessionHistory.find((item) => item.sessionId === activeSessionId)
+    if (fromList) {
+      if (transcript.length > 0) {
+        return {
+          ...fromList,
+          transcript,
+        }
+      }
+      return fromList
+    }
+
+    if (transcript.length === 0) {
+      return null
+    }
+
+    const lastUserText = latestTranscriptByRole(transcript, "user")
+    const lastAssistantText = latestTranscriptByRole(transcript, "assistant")
+    const userTurns = transcript.filter((item) => item.role === "user").length
+    const assistantTurns = transcript.filter((item) => item.role === "assistant").length
+
+    return {
+      sessionId: activeSessionId,
+      title: lastUserText ? trimText(lastUserText, 80) : `Session ${activeSessionId.slice(0, 8)}`,
+      status: sessionStatusRef.current,
+      updatedAt: new Date().toISOString(),
+      turnCount: Math.max(userTurns, assistantTurns),
+      completedTurnCount: Math.min(userTurns, assistantTurns),
+      lastUserText,
+      lastAssistantText,
+      transcript,
+    }
+  }, [sessionHistory, transcript])
+
+  const recentHistoryItems = useMemo(() => {
+    const activeSessionId = sessionRef.current?.sessionId
+    if (!activeSessionId) {
+      return sessionHistory.slice(0, SESSION_HISTORY_LIMIT)
+    }
+
+    const withoutActive = sessionHistory.filter((item) => item.sessionId !== activeSessionId)
+    if (currentSessionHistory) {
+      return [currentSessionHistory, ...withoutActive].slice(0, SESSION_HISTORY_LIMIT)
+    }
+    return withoutActive.slice(0, SESSION_HISTORY_LIMIT)
+  }, [currentSessionHistory, sessionHistory])
+
+  const selectedHistorySession = useMemo(() => {
+    if (!selectedHistorySessionId) {
+      return null
+    }
+    return recentHistoryItems.find((item) => item.sessionId === selectedHistorySessionId) ?? null
+  }, [recentHistoryItems, selectedHistorySessionId])
+
+  const selectHistorySession = useCallback((targetSessionId: string) => {
+    const normalized = targetSessionId.trim()
+    if (!normalized) {
+      return
+    }
+    setSelectedHistorySessionId(normalized)
+    if (normalized !== sessionRef.current?.sessionId) {
+      void loadSessionTranscript(normalized)
+    }
+  }, [loadSessionTranscript])
+
+  const showInlineMinimalHistory = mode === "minimal" && minimalChatHistoryEnabled
+
+  const activeSessionHistoryCards = useMemo(() => {
+    if (!showInlineMinimalHistory) {
+      return [] as TranscriptItem[]
+    }
+    if (transcript.length > 0) {
+      return transcript.slice(-6)
+    }
+    if (!currentSessionHistory) {
+      return [] as TranscriptItem[]
+    }
+    return currentSessionHistory.transcript.slice(-6)
+  }, [currentSessionHistory, showInlineMinimalHistory, transcript])
+
+  const openHistoryPanel = useCallback(() => {
+    if (!minimalChatHistoryEnabled) {
+      return
+    }
+    if (!historyEndpointSupported) {
+      setHistoryEndpointSupported(true)
+    }
+    setSelectedHistorySessionId(sessionRef.current?.sessionId ?? null)
+    setHistorySidebarOpen(true)
+    setSessionHistory((prev) => (prev.length > 0 ? prev : readStoredSessionHistory()))
+    void refreshSessionHistory({ preserveError: true })
+  }, [historyEndpointSupported, minimalChatHistoryEnabled, refreshSessionHistory])
+
+  const closeHistoryPanel = useCallback(() => {
+    setHistorySidebarOpen(false)
+  }, [])
 
   const checkEngineReadiness = useCallback(async (runtimeBaseUrl: string) => {
     const client = new OpenVoiceWebClient({ baseUrl: runtimeBaseUrl })
@@ -797,6 +1176,105 @@ export function App() {
   }, [turnPhase])
 
   useEffect(() => {
+    transcriptRef.current = transcript
+  }, [transcript])
+
+  useEffect(() => {
+    const activeSessionId = sessionRef.current?.sessionId
+    if (!activeSessionId || transcript.length === 0) {
+      return
+    }
+
+    const lastUserText = latestTranscriptByRole(transcript, "user")
+    const lastAssistantText = latestTranscriptByRole(transcript, "assistant")
+    const userTurns = transcript.filter((item) => item.role === "user").length
+    const assistantTurns = transcript.filter((item) => item.role === "assistant").length
+    const updatedAt = new Date().toISOString()
+
+    setSessionHistory((prev) => {
+      const updated: SessionConversationHistory = {
+        sessionId: activeSessionId,
+        title: lastUserText ? trimText(lastUserText, 80) : `Session ${activeSessionId.slice(0, 8)}`,
+        status: sessionStatusRef.current,
+        updatedAt,
+        turnCount: Math.max(userTurns, assistantTurns),
+        completedTurnCount: Math.min(userTurns, assistantTurns),
+        lastUserText,
+        lastAssistantText,
+        transcript: transcript.slice(-SESSION_TRANSCRIPT_LIMIT),
+      }
+
+      return dedupeAndSortHistory([
+        updated,
+        ...prev.filter((item) => item.sessionId !== activeSessionId),
+      ])
+    })
+  }, [transcript])
+
+  useEffect(() => {
+    const activeSessionId = sessionRef.current?.sessionId
+    if (!activeSessionId) {
+      return
+    }
+    setSessionHistory((prev) => {
+      const nowIso = new Date().toISOString()
+      const existing = prev.find((item) => item.sessionId === activeSessionId)
+      const nextItem: SessionConversationHistory = existing
+        ? {
+            ...existing,
+            status: sessionStatus,
+            updatedAt: nowIso,
+          }
+        : {
+            sessionId: activeSessionId,
+            title: `Session ${activeSessionId.slice(0, 8)}`,
+            status: sessionStatus,
+            updatedAt: nowIso,
+            turnCount: 0,
+            completedTurnCount: 0,
+            lastUserText: null,
+            lastAssistantText: null,
+            transcript: [],
+          }
+
+      return dedupeAndSortHistory([
+        nextItem,
+        ...prev.filter((item) => item.sessionId !== activeSessionId),
+      ])
+    })
+  }, [sessionStatus])
+
+  useEffect(() => {
+    writeStoredSessionHistory(sessionHistory)
+  }, [sessionHistory])
+
+  useEffect(() => {
+    if (!historySidebarOpen) {
+      return
+    }
+    if (selectedHistorySessionId && recentHistoryItems.some((item) => item.sessionId === selectedHistorySessionId)) {
+      return
+    }
+    if (recentHistoryItems.length === 0) {
+      return
+    }
+    setSelectedHistorySessionId(recentHistoryItems[0].sessionId)
+  }, [historySidebarOpen, recentHistoryItems, selectedHistorySessionId])
+
+  useEffect(() => {
+    if (!historySidebarOpen || !selectedHistorySession) {
+      return
+    }
+    if (selectedHistorySession.transcript.length > 0) {
+      return
+    }
+    if (selectedHistorySession.sessionId === sessionRef.current?.sessionId) {
+      return
+    }
+    void loadSessionTranscript(selectedHistorySession.sessionId)
+  }, [historySidebarOpen, loadSessionTranscript, selectedHistorySession])
+
+  useEffect(() => {
     localStorage.setItem(
       MINIMAL_CAPTIONS_STORAGE_KEY,
       minimalCaptionsEnabled ? "1" : "0",
@@ -809,6 +1287,81 @@ export function App() {
       minimalDetailEnabled ? "1" : "0",
     )
   }, [minimalDetailEnabled])
+
+  useEffect(() => {
+    localStorage.setItem(
+      MINIMAL_CHAT_HISTORY_STORAGE_KEY,
+      minimalChatHistoryEnabled ? "1" : "0",
+    )
+  }, [minimalChatHistoryEnabled])
+
+  useEffect(() => {
+    if (mode !== "minimal") {
+      return
+    }
+    if (!minimalChatHistoryEnabled) {
+      setHistorySidebarOpen(false)
+    }
+  }, [minimalChatHistoryEnabled, mode])
+
+  useEffect(() => {
+    if (mode !== "minimal") {
+      setHistorySidebarOpen(false)
+      return
+    }
+    void refreshSessionHistory()
+  }, [mode, refreshSessionHistory])
+
+  useEffect(() => {
+    if (!historySidebarOpen || mode !== "minimal") {
+      return
+    }
+    void refreshSessionHistory({ preserveError: true })
+  }, [historySidebarOpen, mode, refreshSessionHistory])
+
+  useEffect(() => {
+    if (mode !== "minimal") {
+      return
+    }
+    setSessionHistory((prev) => {
+      const activeSessionId = sessionRef.current?.sessionId
+      if (!activeSessionId) {
+        return prev
+      }
+      return prev.map((item) => (
+        item.sessionId === activeSessionId
+          ? { ...item, transcript }
+          : item
+      ))
+    })
+  }, [mode, transcript])
+
+  useEffect(() => {
+    if (!historySidebarOpen || mode !== "minimal") {
+      return
+    }
+    const timer = window.setInterval(() => {
+      void refreshSessionHistory({ preserveError: true })
+    }, 6000)
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [historySidebarOpen, mode, refreshSessionHistory])
+
+  useEffect(() => {
+    if (mode !== "minimal") {
+      return
+    }
+    for (const item of recentHistoryItems) {
+      if (item.transcript.length > 0) {
+        continue
+      }
+      if (item.sessionId === sessionRef.current?.sessionId) {
+        continue
+      }
+      void loadSessionTranscript(item.sessionId)
+    }
+  }, [loadSessionTranscript, mode, recentHistoryItems])
 
   useEffect(() => {
     thinkingHoldUntilRef.current = thinkingHoldUntil
@@ -1109,6 +1662,7 @@ export function App() {
 
     localBargeInFramesRef.current = 0
     localBargeInCooldownUntilRef.current = Date.now() + DEMO_LOCAL_BARGE_IN_COOLDOWN_MS
+    allowAutoInterruptUntilRef.current = 0
     interruptionInFlightRef.current = true
     suppressTtsUntilNextUserFinalRef.current = true
     rejectGeneration(activeGenerationIdRef.current)
@@ -1331,7 +1885,13 @@ export function App() {
       const speechStartDetected = event.kind === "start_of_speech" || confidentInferenceSpeech
 
       if (speechStartDetected) {
-        if (shouldAutoBargeInterrupt && isInterruptWorthyVad(event)) {
+        allowAutoInterruptUntilRef.current = Date.now() + 700
+        if (
+          shouldAutoBargeInterrupt
+          && DEMO_ENABLE_VAD_AUTO_INTERRUPT
+          && DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT
+          && isInterruptWorthyVad(event)
+        ) {
           triggerImmediateInterrupt("vad")
         }
         if (pendingTurnStartedAtRef.current) {
@@ -1461,6 +2021,14 @@ export function App() {
         && !interruptionInFlightRef.current
         && isInterruptWorthyPartial(partialText)
       ) {
+        traceReporterRef.current?.trackLocal(
+          "ui.auto_interrupt.stt_partial_candidate",
+          {
+            session_id: sessionRef.current?.sessionId ?? null,
+            text: partialText,
+          },
+          "ui.action",
+        )
         triggerImmediateInterrupt("stt_partial")
       }
       if (hasPartialText && canRenderUserSpeech) {
@@ -1517,6 +2085,16 @@ export function App() {
       interruptionInFlightRef.current = false
       if (event.text.trim()) {
         lastUserSpeechAtRef.current = Date.now()
+        allowAutoInterruptUntilRef.current = 0
+        if (
+          shouldAutoBargeInterrupt
+          && DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT
+          && !interruptionInFlightRef.current
+          && (ttsPlayingRef.current || ttsStreamActiveRef.current || llmThinkingActiveRef.current)
+          && isInterruptWorthyPartial(event.text)
+        ) {
+          triggerImmediateInterrupt("stt_partial")
+        }
       }
       setSttLiveText(event.text || "")
       setRouteName("routing")
@@ -1527,12 +2105,10 @@ export function App() {
       const isCommittedUserFinal = typeof event.generation_id === "string" && event.generation_id.length > 0
       if (isCommittedUserFinal && dedupeKey !== seenUserFinalRef.current && event.text.trim()) {
         seenUserFinalRef.current = dedupeKey
-        if (mode !== "minimal") {
-          setTranscript((prev) => {
-            const next = [...prev, { role: "user", text: event.text }]
-            return next.length > 50 ? next.slice(-50) : next
-          })
-        }
+        setTranscript((prev) => {
+          const next = [...prev, { role: "user", text: event.text }]
+          return next.length > SESSION_TRANSCRIPT_LIMIT ? next.slice(-SESSION_TRANSCRIPT_LIMIT) : next
+        })
       }
       return
     }
@@ -1672,11 +2248,11 @@ export function App() {
         llmResponseTextRef.current = event.text
         if (mode !== "minimal") {
           setLlmResponseText(event.text)
-          setTranscript((prev) => {
-            const next = [...prev, { role: "assistant", text: event.text }]
-            return next.length > 50 ? next.slice(-50) : next
-          })
         }
+        setTranscript((prev) => {
+          const next = [...prev, { role: "assistant", text: event.text }]
+          return next.length > SESSION_TRANSCRIPT_LIMIT ? next.slice(-SESSION_TRANSCRIPT_LIMIT) : next
+        })
       }
       return
     }
@@ -1790,7 +2366,7 @@ export function App() {
       clearSpeechWatchdog()
       sttCurrentTurnIdRef.current = null
       sttCurrentGenerationIdRef.current = null
-      setTurnPhaseStable("idle")
+      setTurnPhaseStable(sessionRef.current && micRef.current ? "listening" : "idle")
       await hardStopPlayback()
       interruptionInFlightRef.current = false
       clearGenerationWatchdog()
@@ -1876,6 +2452,11 @@ export function App() {
           return
         }
 
+        if (now > allowAutoInterruptUntilRef.current) {
+          localBargeInFramesRef.current = 0
+          return
+        }
+
         if (!DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT) {
           localBargeInFramesRef.current = 0
           return
@@ -1934,6 +2515,7 @@ export function App() {
     localBargeInFramesRef.current = 0
     localBargeInCooldownUntilRef.current = 0
     localBargeInNoiseFloorRef.current = 0
+    allowAutoInterruptUntilRef.current = 0
 
     if (!mic) {
       return
@@ -2078,14 +2660,18 @@ export function App() {
     clearSpeechWatchdog()
     clearMicHoldTimer()
     clearIdleTransitionTimer()
+    setHistorySidebarOpen(false)
     micHoldActiveRef.current = false
     suppressMicTapRef.current = false
     minimalMicUserControlledRef.current = false
     setIsMicHoldActive(false)
     persistSessionIdToUrl(null)
     setRequestedSessionId(null)
+    requestedSessionLoadAttemptRef.current = null
     setSessionId("-")
     setSessionStatus("disconnected")
+    historyTranscriptRequestedRef.current.clear()
+    setSelectedHistorySessionId(null)
     setTurnPhaseStable("idle")
     clearGenerationWatchdog()
     setSttLiveText("")
@@ -2103,24 +2689,27 @@ export function App() {
     localBargeInFramesRef.current = 0
     localBargeInCooldownUntilRef.current = 0
     localBargeInNoiseFloorRef.current = 0
+    allowAutoInterruptUntilRef.current = 0
     await traceReporterRef.current?.flush(false)
     traceReporterRef.current?.stop()
     traceReporterRef.current = null
     isDisconnectingRef.current = false
+    void refreshSessionHistory({ preserveError: true })
   }, [
     clearIdleTransitionTimer,
     clearMicHoldTimer,
     clearPendingTurn,
     clearGenerationWatchdog,
     clearSpeechWatchdog,
+    refreshSessionHistory,
     setTurnPhaseStable,
     stopListening,
   ])
 
-  const connect = useCallback(async () => {
+  const connect = useCallback(async (forcedSessionId?: string) => {
     if (sessionRef.current) return
     setLastError("")
-    let resumeSessionId = requestedSessionId?.trim() || undefined
+    let resumeSessionId = forcedSessionId?.trim() || requestedSessionId?.trim() || undefined
     let traceReporter: FrontendTraceReporter | null = null
     try {
       await checkEngineReadiness(baseUrl)
@@ -2130,17 +2719,9 @@ export function App() {
 
       const client = new OpenVoiceWebClient({ baseUrl })
       if (resumeSessionId) {
-        try {
-          const existing = await client.http.getSession(resumeSessionId)
-          if (isSessionClosedOrFailed(existing.status)) {
-            persistSessionIdToUrl(null)
-            setRequestedSessionId(null)
-            resumeSessionId = undefined
-          }
-        } catch {
-          persistSessionIdToUrl(null)
-          setRequestedSessionId(null)
-          resumeSessionId = undefined
+        const existing = await client.http.getSession(resumeSessionId)
+        if (isSessionClosedOrFailed(existing.status)) {
+          throw new Error(`requested session is ${existing.status}`)
         }
       }
       if (!sdkPlayerRef.current) {
@@ -2198,23 +2779,11 @@ export function App() {
       let session: WebVoiceSession
       let resumedExistingSession = false
       if (resumeSessionId) {
-        try {
-          session = await client.connectSession({
-            ...baseConnectOptions,
-            sessionId: resumeSessionId,
-          })
-          resumedExistingSession = true
-        } catch (error) {
-          const reason = error instanceof Error ? error.message : String(error)
-          persistSessionIdToUrl(null)
-          setRequestedSessionId(null)
-          traceReporter.trackLocal("ui.session.resume_discarded", {
-            resume_session_id: resumeSessionId,
-            reason,
-          })
-          session = await client.connectSession(baseConnectOptions)
-          resumedExistingSession = false
-        }
+        session = await client.connectSession({
+          ...baseConnectOptions,
+          sessionId: resumeSessionId,
+        })
+        resumedExistingSession = true
       } else {
         session = await client.connectSession(baseConnectOptions)
       }
@@ -2228,12 +2797,20 @@ export function App() {
       })
 
       sessionRef.current = session
+      historyTranscriptRequestedRef.current.add(session.sessionId)
       persistSessionIdToUrl(session.sessionId)
       setRequestedSessionId(session.sessionId)
       setSessionId(session.sessionId)
       setSessionStatus("connected")
       setTurnPhaseStable(micRef.current ? "listening" : "idle")
-      setTranscript([])
+      const localSeedTranscript = readStoredSessionHistory()
+        .find((item) => item.sessionId === session.sessionId)
+        ?.transcript ?? []
+      setTranscript(
+        resumedExistingSession && localSeedTranscript.length > 0
+          ? localSeedTranscript.slice(-SESSION_TRANSCRIPT_LIMIT)
+          : [],
+      )
       setEvents([])
       setLlmThinkingText("")
       setLlmResponseText("")
@@ -2258,6 +2835,10 @@ export function App() {
       rejectedGenerationIdsRef.current.clear()
       seenUserFinalRef.current = ""
       localStorage.setItem("openvoice.runtimeBaseUrl", baseUrl)
+      void refreshSessionHistory({ preserveError: true })
+      if (resumedExistingSession) {
+        void loadSessionTranscript(session.sessionId, { setActiveTranscript: true })
+      }
       const sessionStartConfig = toRuntimeConfigPayload(runtimeConfig) ?? {}
       session.send({
         type: "session.start",
@@ -2274,6 +2855,7 @@ export function App() {
           setLastError(`connected, but mic start failed: ${message}`)
         }
       }
+      requestedSessionLoadAttemptRef.current = null
     } catch (error) {
       setLlmThinkingActive(false)
       if (!sessionRef.current && traceReporter) {
@@ -2297,12 +2879,62 @@ export function App() {
     handleEvent,
     mode,
     effectiveQueuePolicy,
+    loadSessionTranscript,
     requestedSessionId,
     runtimeConfig,
+    refreshSessionHistory,
     setTurnPhaseStable,
     startListening,
     voiceId,
   ])
+
+  useEffect(() => {
+    if (mode !== "minimal") {
+      return
+    }
+    if (isSwitchingSession) {
+      return
+    }
+    const fromUrl = requestedSessionId?.trim() || ""
+    if (!fromUrl) {
+      requestedSessionLoadAttemptRef.current = null
+      return
+    }
+    if (sessionRef.current?.sessionId === fromUrl) {
+      requestedSessionLoadAttemptRef.current = null
+      return
+    }
+    if (requestedSessionLoadAttemptRef.current === fromUrl) {
+      return
+    }
+    requestedSessionLoadAttemptRef.current = fromUrl
+    void connect(fromUrl)
+  }, [connect, isSwitchingSession, mode, requestedSessionId])
+
+  const resumeHistorySession = useCallback(async (targetSessionId: string) => {
+    const normalized = targetSessionId.trim()
+    if (!normalized) {
+      return
+    }
+    if (normalized === sessionRef.current?.sessionId) {
+      setHistorySidebarOpen(false)
+      return
+    }
+
+    setLastError("")
+    setIsSwitchingSession(true)
+    requestedSessionLoadAttemptRef.current = normalized
+    setSelectedHistorySessionId(normalized)
+    persistSessionIdToUrl(normalized)
+    setRequestedSessionId(normalized)
+    setHistorySidebarOpen(false)
+    try {
+      await disconnect()
+      await connect(normalized)
+    } finally {
+      setIsSwitchingSession(false)
+    }
+  }, [connect, disconnect])
 
   const interrupt = useCallback(() => {
     if (!sessionRef.current) return
@@ -2318,7 +2950,14 @@ export function App() {
   }, [clearPendingTurn, hardStopPlayback, rejectGeneration, setTurnPhaseStable])
 
   useEffect(() => {
+    disconnectForCleanupRef.current = disconnect
+  }, [disconnect])
+
+  useEffect(() => {
     if (mode !== "minimal") return
+    if (historySidebarOpen) return
+    if (requestedSessionId?.trim()) return
+    if (isSwitchingSession) return
     const run = async () => {
       try {
         if (!sessionRef.current) {
@@ -2336,11 +2975,15 @@ export function App() {
       }
     }
     void run()
-  }, [mode, connect, startListening])
+  }, [mode, historySidebarOpen, requestedSessionId, isSwitchingSession, connect, startListening])
 
   useEffect(() => {
     if (!baseUrl.trim()) return
     localStorage.setItem("openvoice.runtimeBaseUrl", baseUrl.trim())
+  }, [baseUrl])
+
+  useEffect(() => {
+    setHistoryEndpointSupported(true)
   }, [baseUrl])
 
   useEffect(() => {
@@ -2407,6 +3050,33 @@ export function App() {
       window.removeEventListener("keydown", onKeyDown)
     }
   }, [minimalSettingsOpen])
+
+  useEffect(() => {
+    if (!historySidebarOpen) {
+      return
+    }
+
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target
+      if (!(target instanceof Node)) return
+      if (!historySidebarRef.current?.contains(target)) {
+        setHistorySidebarOpen(false)
+      }
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setHistorySidebarOpen(false)
+      }
+    }
+
+    window.addEventListener("mousedown", onPointerDown)
+    window.addEventListener("keydown", onKeyDown)
+    return () => {
+      window.removeEventListener("mousedown", onPointerDown)
+      window.removeEventListener("keydown", onKeyDown)
+    }
+  }, [historySidebarOpen])
 
   useEffect(() => {
     let cancelled = false
@@ -2482,9 +3152,9 @@ export function App() {
       clearMicHoldTimer()
       clearIdleTransitionTimer()
       clearSpeechWatchdog()
-      void disconnect()
+      void disconnectForCleanupRef.current?.()
     }
-  }, [clearIdleTransitionTimer, clearMicHoldTimer, clearSpeechWatchdog, disconnect])
+  }, [clearIdleTransitionTimer, clearMicHoldTimer, clearSpeechWatchdog])
 
   useEffect(() => {
     return () => {
@@ -2504,7 +3174,6 @@ export function App() {
       return
     }
     setEvents([])
-    setTranscript([])
     setLlmThinkingText("")
     setLlmResponseText("")
     llmResponseTextRef.current = ""
@@ -2522,6 +3191,72 @@ export function App() {
   if (mode === "minimal") {
     return (
       <main className="shell shell-minimal" aria-label="Open Voice SDK minimal mode">
+        {historySidebarOpen && minimalChatHistoryEnabled ? (
+          <aside className="history-overlay" aria-hidden="true" />
+        ) : null}
+        {historySidebarOpen && minimalChatHistoryEnabled ? (
+          <aside className="history-sidebar" ref={historySidebarRef} aria-label="Conversation history">
+            <div className="history-sidebar-head">
+              <h2>Recent chats</h2>
+              <div className="history-sidebar-actions">
+                <Button
+                  type="button"
+                  className="history-open-session-btn"
+                  onClick={() => void resumeHistorySession(selectedHistorySession?.sessionId ?? "")}
+                  disabled={
+                    isSwitchingSession
+                    || !selectedHistorySession
+                    || selectedHistorySession.sessionId === sessionRef.current?.sessionId
+                  }
+                >
+                  {isSwitchingSession ? "Opening..." : "Open selected"}
+                </Button>
+                <Button type="button" className="history-close-btn" onClick={closeHistoryPanel}>Close</Button>
+              </div>
+            </div>
+            <p className="history-subtitle">Last {SESSION_HISTORY_LIMIT} chats</p>
+            {historyLoading ? <p className="history-status">Loading history...</p> : null}
+            {historyError ? <p className="history-status history-status-error">{historyError}</p> : null}
+            <div className="history-list" role="list">
+              {recentHistoryItems.length === 0 ? (
+                <p className="history-status">No previous sessions yet.</p>
+              ) : null}
+              {recentHistoryItems.map((item) => {
+                const isCurrent = item.sessionId === sessionRef.current?.sessionId
+                const isSelected = item.sessionId === selectedHistorySession?.sessionId
+                return (
+                  <article
+                    key={item.sessionId}
+                    role="listitem"
+                    className={`history-item${isCurrent ? " current" : ""}${isSelected ? " selected" : ""}`}
+                  >
+                    <button
+                      type="button"
+                      className="history-open-btn"
+                      onClick={() => void resumeHistorySession(item.sessionId)}
+                      disabled={isCurrent || isSwitchingSession}
+                      title={isCurrent ? "Current session" : "Open this session"}
+                    >
+                      <span className="history-item-title">{item.title}</span>
+                      <span className="history-item-meta">{item.status} · {item.completedTurnCount} turns</span>
+                    </button>
+                    {item.transcript.length > 0 ? (
+                      <div className="history-item-preview" aria-live="polite">
+                        {item.transcript.slice(-3).map((turn, index) => (
+                          <p key={`${item.sessionId}-${index}`} className={`history-line ${turn.role}`}>
+                            <strong>{turn.role === "user" ? "You" : "AI"}:</strong> {transcriptSummaryText(turn)}
+                          </p>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="history-empty">No transcript captured yet.</p>
+                    )}
+                  </article>
+                )
+              })}
+            </div>
+          </aside>
+        ) : null}
         <section className="minimal-stage" aria-label="Minimal voice experience">
           <article className={`minimal-notebook${minimalCaptionsEnabled ? " show-captions" : ""}${minimalDetailEnabled ? " show-detail" : ""}`}>
             <div className="minimal-frame" aria-hidden="true">
@@ -2646,6 +3381,24 @@ export function App() {
               </Card>
             ) : null}
 
+            {showInlineMinimalHistory ? (
+              <Card className="minimal-history-card" aria-live="polite">
+                <div className="minimal-history-head">
+                  <p className="minimal-detail-label">Current chat history</p>
+                  <p className="minimal-detail-value">{activeSessionHistoryCards.length} items</p>
+                </div>
+                <div className="minimal-history-list">
+                  {activeSessionHistoryCards.length === 0 ? (
+                    <p className="history-empty">No conversation turns yet.</p>
+                  ) : activeSessionHistoryCards.map((item, index) => (
+                    <p key={`active-history-${index}`} className={`history-line ${item.role}`}>
+                      <strong>{item.role === "user" ? "You" : "AI"}:</strong> {transcriptSummaryText(item)}
+                    </p>
+                  ))}
+                </div>
+              </Card>
+            ) : null}
+
             {lastError ? <p className="error-text minimal-error">{lastError}</p> : null}
 
             <div className="minimal-settings" ref={minimalSettingsRef}>
@@ -2666,6 +3419,14 @@ export function App() {
                   >
                     <span>Detail</span>
                     <span aria-hidden="true">{minimalDetailEnabled ? "On" : "Off"}</span>
+                  </Button>
+                  <Button
+                    type="button"
+                    className={`minimal-setting-toggle${minimalChatHistoryEnabled ? " enabled" : ""}`}
+                    onClick={() => setMinimalChatHistoryEnabled((prev) => !prev)}
+                  >
+                    <span>Chat history</span>
+                    <span aria-hidden="true">{minimalChatHistoryEnabled ? "On" : "Off"}</span>
                   </Button>
                 </Card>
               ) : null}
@@ -2688,6 +3449,21 @@ export function App() {
                 </svg>
               </Button>
             </div>
+
+            {minimalChatHistoryEnabled ? (
+              <Button
+                type="button"
+                className="history-toggle-btn"
+                onClick={openHistoryPanel}
+                aria-label="Open chat history"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M4 5h16v14H8l-4 3V5" />
+                  <line x1="8" y1="10" x2="16" y2="10" />
+                  <line x1="8" y1="14" x2="14" y2="14" />
+                </svg>
+              </Button>
+            ) : null}
           </article>
         </section>
       </main>

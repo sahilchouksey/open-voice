@@ -8,6 +8,7 @@ from open_voice_runtime.session.models import (
     SessionState,
     SessionStatus,
     SessionTransition,
+    SessionTurn,
 )
 from open_voice_runtime.session.state_machine import transition_session
 
@@ -19,6 +20,14 @@ class SessionManager(ABC):
 
     @abstractmethod
     async def get(self, session_id: str) -> SessionState:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list(self, *, limit: int | None = None) -> list[SessionState]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_turns(self, session_id: str, *, limit: int | None = None) -> list[SessionTurn]:
         raise NotImplementedError
 
     @abstractmethod
@@ -52,6 +61,23 @@ class InMemorySessionManager(SessionManager):
                 retryable=False,
                 details={"session_id": session_id},
             ) from exc
+
+    async def list(self, *, limit: int | None = None) -> list[SessionState]:
+        sessions = sorted(
+            self._sessions.values(),
+            key=lambda state: state.updated_at,
+            reverse=True,
+        )
+        if limit is None or limit <= 0:
+            return sessions
+        return sessions[:limit]
+
+    async def list_turns(self, session_id: str, *, limit: int | None = None) -> list[SessionTurn]:
+        session = await self.get(session_id)
+        turns = list(session.turns)
+        if limit is None or limit <= 0:
+            return turns
+        return turns[-limit:]
 
     async def update(self, session_id: str, event: SessionTransition) -> SessionState:
         session = await self.get(session_id)

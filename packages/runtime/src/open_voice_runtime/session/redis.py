@@ -130,6 +130,29 @@ class RedisSessionManager(SessionManager):
             )
         return _deserialize_state(raw)
 
+    async def list(self, *, limit: int | None = None) -> list[SessionState]:
+        redis = await self._ensure_redis()
+        session_ids = await redis.smembers(self._index_key)
+        states: list[SessionState] = []
+        for session_id in session_ids:
+            raw = await redis.get(self._key(session_id))
+            if raw is None:
+                await redis.srem(self._index_key, session_id)
+                continue
+            states.append(_deserialize_state(raw))
+
+        states.sort(key=lambda state: state.updated_at, reverse=True)
+        if limit is None or limit <= 0:
+            return states
+        return states[:limit]
+
+    async def list_turns(self, session_id: str, *, limit: int | None = None) -> list[SessionTurn]:
+        state = await self.get(session_id)
+        turns = list(state.turns)
+        if limit is None or limit <= 0:
+            return turns
+        return turns[-limit:]
+
     async def update(self, session_id: str, event: SessionTransition) -> SessionState:
         session = await self.get(session_id)
         updated = transition_session(session, event)

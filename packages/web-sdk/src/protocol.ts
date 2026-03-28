@@ -27,6 +27,27 @@ export interface SessionState {
   metadata?: Record<string, unknown>
 }
 
+export interface SessionHistoryEntry {
+  session_id: string
+  status: SessionStatus
+  title: string
+  created_at: string
+  updated_at: string
+  active_turn_id?: string | null
+  turn_count: number
+  completed_turn_count: number
+  last_user_text?: string | null
+  last_assistant_text?: string | null
+}
+
+export interface SessionTurnEntry {
+  turn_id: string
+  user_text?: string | null
+  assistant_text?: string | null
+  created_at: string
+  completed_at?: string | null
+}
+
 export interface EngineDescriptor {
   id: string
   kind: "stt" | "vad" | "router" | "llm" | "tts"

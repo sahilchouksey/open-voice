@@ -47,6 +47,23 @@ def install_http_routes(app: FastAPI, server: RuntimeServer) -> None:
         except OpenVoiceError as error:
             return JSONResponse(status_code=404, content=error.to_payload())
 
+    @app.get("/v1/sessions/{session_id}/turns")
+    async def list_session_turns(session_id: str, limit: int | None = None) -> object:
+        safe_limit = None
+        if isinstance(limit, int):
+            safe_limit = max(1, min(limit, 200))
+        try:
+            return await server.list_session_turns(session_id, limit=safe_limit)
+        except OpenVoiceError as error:
+            return JSONResponse(status_code=404, content=error.to_payload())
+
+    @app.get("/v1/sessions")
+    async def list_sessions(limit: int | None = None) -> object:
+        safe_limit = None
+        if isinstance(limit, int):
+            safe_limit = max(1, min(limit, 100))
+        return await server.list_sessions(limit=safe_limit)
+
     @app.delete("/v1/sessions/{session_id}")
     async def close_session(session_id: str) -> Response:
         try:

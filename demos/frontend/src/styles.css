@@ -544,6 +544,7 @@ button:disabled {
 
 .minimal-caption-card,
 .minimal-detail-card,
+.minimal-history-card,
 .minimal-error,
 .minimal-pending {
   width: calc(100% - ((var(--frame-inset) + 8px) * 2));
@@ -729,6 +730,220 @@ button:disabled {
   background: rgba(1, 1, 1, 0.66);
   max-height: 84px;
   overflow: hidden;
+}
+
+.minimal-history-card {
+  margin-top: 2px;
+  padding: 8px;
+  border-color: #2a2a2a;
+  background: rgba(1, 1, 1, 0.75);
+  max-height: 180px;
+  overflow: hidden;
+}
+
+.minimal-history-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+  gap: 10px;
+}
+
+.minimal-history-list {
+  display: grid;
+  gap: 6px;
+  max-height: 136px;
+  overflow: auto;
+}
+
+.history-line {
+  margin: 0;
+  font-size: 0.72rem;
+  line-height: 1.25;
+  color: #e8e8e8;
+  border: 1px solid #1f1f1f;
+  background: rgba(5, 5, 5, 0.9);
+  padding: 6px 8px;
+}
+
+.history-line.user {
+  border-color: #313131;
+}
+
+.history-line.assistant {
+  border-color: #3b3b3b;
+}
+
+.history-line strong {
+  font-size: 0.68rem;
+  color: #b9b9b9;
+  margin-right: 4px;
+}
+
+.history-empty {
+  margin: 0;
+  color: #8e8e8e;
+  font-size: 0.72rem;
+}
+
+.history-toggle-btn {
+  position: absolute;
+  top: calc(var(--frame-inset) + 68px);
+  left: calc(var(--frame-inset) + 10px);
+  min-width: 42px;
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
+  border-color: #3d3d3d;
+  background: rgba(0, 0, 0, 0.9);
+  color: #ececec;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  z-index: 6;
+}
+
+.history-toggle-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.history-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.58);
+  backdrop-filter: blur(1px);
+  z-index: 30;
+}
+
+.history-sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: min(380px, 92vw);
+  background: linear-gradient(180deg, #0a0a0a 0%, #040404 100%);
+  border-right: 1px solid #2f2f2f;
+  padding: 16px 12px;
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  gap: 10px;
+  z-index: 40;
+}
+
+.history-sidebar-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.history-sidebar-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.history-sidebar-head h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.history-close-btn {
+  padding: 6px 10px;
+  font-size: 0.76rem;
+}
+
+.history-open-session-btn {
+  padding: 6px 10px;
+  font-size: 0.76rem;
+}
+
+.history-subtitle,
+.history-status {
+  margin: 0;
+  font-size: 0.76rem;
+  color: #949494;
+}
+
+.history-status-error {
+  color: #ff9aa8;
+}
+
+.history-list {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.history-item {
+  border: 1px solid #2a2a2a;
+  background: rgba(8, 8, 8, 0.95);
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.history-item.current {
+  border-color: #f2f2f2;
+}
+
+.history-item.selected {
+  box-shadow: inset 0 0 0 1px #ffffff;
+}
+
+.history-open-btn {
+  width: 100%;
+  text-align: left;
+  border-color: #3a3a3a;
+  background: #090909;
+  color: #f1f1f1;
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+}
+
+.history-open-btn:disabled {
+  opacity: 1;
+  cursor: default;
+  border-color: #ffffff;
+  background: #ffffff;
+  color: #000000;
+}
+
+.history-item-title {
+  display: block;
+  font-size: 0.82rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-item-meta {
+  display: block;
+  font-size: 0.68rem;
+  color: #979797;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.history-item-preview {
+  display: grid;
+  gap: 5px;
+}
+
+.history-open-btn:hover .history-item-meta,
+.history-open-btn:hover .history-item-title {
+  color: inherit;
 }
 
 .minimal-detail-grid {
@@ -927,6 +1142,7 @@ button:disabled {
 
   .minimal-caption-card,
   .minimal-detail-card,
+  .minimal-history-card,
   .minimal-error,
   .minimal-pending {
     width: calc(100% - ((var(--frame-inset) + 8px) * 2));
@@ -941,6 +1157,19 @@ button:disabled {
   .minimal-settings {
     right: calc(var(--frame-inset) + 8px);
     bottom: calc(var(--frame-inset) + 8px);
+  }
+
+  .history-toggle-btn {
+    top: calc(var(--frame-inset) + 78px);
+    left: calc(var(--frame-inset) + 8px);
+    width: 40px;
+    height: 40px;
+    min-width: 40px;
+  }
+
+  .history-sidebar {
+    width: min(94vw, 360px);
+    padding: 14px 10px;
   }
 
   .minimal-logo,
@@ -1000,6 +1229,15 @@ button:disabled {
   .minimal-detail-card {
     max-height: 76px;
     padding: 6px;
+  }
+
+  .minimal-history-card {
+    max-height: 164px;
+    padding: 6px;
+  }
+
+  .minimal-history-list {
+    max-height: 122px;
   }
 
   .minimal-detail-item {

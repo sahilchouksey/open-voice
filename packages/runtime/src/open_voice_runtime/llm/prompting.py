@@ -29,11 +29,60 @@ _SYMBOL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\*+"), ""),
 ]
 
+_URL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # Markdown links -> keep only domain from link target.
+    (
+        re.compile(
+            r"\[[^\]]+\]\((?:https?://)?(?:www\.)?((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})"
+            r"(?::\d+)?(?:/[^)]*)?\)",
+            re.IGNORECASE,
+        ),
+        r"\1",
+    ),
+    # Full URLs -> keep only domain.
+    (
+        re.compile(
+            r"\bhttps?://(?:www\.)?((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})"
+            r"(?::\d+)?(?:/[^\s)]*)?",
+            re.IGNORECASE,
+        ),
+        r"\1",
+    ),
+    # Common www-prefixed links -> keep only domain.
+    (
+        re.compile(
+            r"\bwww\.((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})(?::\d+)?(?:/[^\s)]*)?",
+            re.IGNORECASE,
+        ),
+        r"\1",
+    ),
+    # Bare domains with optional paths -> keep only domain.
+    (
+        re.compile(
+            r"(?<!@)\b((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,})(?::\d+)?(?:/[^\s)]*)?\b",
+            re.IGNORECASE,
+        ),
+        r"\1",
+    ),
+    # Spoken-out domains like "example dot com slash page" -> keep domain-only spoken form.
+    (
+        re.compile(
+            r"\b((?:[a-z0-9-]+\s+dot\s+)+(?:com|org|net|io|ai|dev|co|edu|gov|in|uk|us|app|info|me|xyz|tv|gg|ly|to))"
+            r"(?:\s+slash\s+[^\s,.;:!?]+)+\b",
+            re.IGNORECASE,
+        ),
+        r"\1",
+    ),
+]
+
 
 def strip_tts_symbols(text: str) -> str:
     """Remove markdown/symbols from LLM output that would be spoken aloud incorrectly."""
     for pattern, replacement in _SYMBOL_PATTERNS:
         text = pattern.sub(replacement, text)
+    for pattern, replacement in _URL_PATTERNS:
+        text = pattern.sub(replacement, text)
+    text = re.sub(r"\s{2,}", " ", text)
     return text
 
 
@@ -68,7 +117,9 @@ OPEN_VOICE_BASE_SYSTEM_PROMPT = (
     "REQUIRED FORMATTING FOR SPEECH:\n"
     "- Write ALL numbers as words: forty-two not forty-two written as digits\n"
     "- Spell out dates naturally: march fifteenth not three slash fifteen\n"
-    "- Speak URLs naturally: example dot com not example.com\n"
+    "- Never read full URLs out loud\n"
+    "- If a source must be referenced, say only the domain name\n"
+    "- Never include protocol path query fragments tracking parameters or full link strings\n"
     "- Spell acronyms on first use: A-P-I not API\n"
     "- Use natural contractions: do not we will I am you are\n"
     "- Write currency naturally: forty nine dollars and ninety nine cents\n"

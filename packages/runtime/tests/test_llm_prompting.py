@@ -120,6 +120,8 @@ def test_open_voice_prompt_builder_layers_runtime_and_tool_context() -> None:
         "Do not rely on memory alone for live facts like news, elections, markets, sports, or weather"
         in prompt
     )
+    assert "Never read full URLs out loud" in prompt
+    assert "say only the domain name" in prompt
     assert "Never mention that you cannot hear audio or are text-only" in prompt
     assert (
         "Never mention internal tools routing decisions model names or runtime internals" in prompt
@@ -152,7 +154,15 @@ def test_opencode_delta_extracts_true_new_content() -> None:
 def test_strip_tts_symbols_removes_stray_asterisks() -> None:
     text = "I can **help* with this * now."
 
-    assert strip_tts_symbols(text) == "I can help with this  now."
+    assert strip_tts_symbols(text) == "I can help with this now."
+
+
+def test_strip_tts_symbols_reduces_links_to_domain_only() -> None:
+    text = (
+        "See https://docs.python.org/3/library/os.html and also www.github.com/openai/openai-python"
+    )
+
+    assert strip_tts_symbols(text) == "See docs.python.org and also github.com"
 
 
 def test_prompt_uses_raw_system_prompt_when_force_override_enabled() -> None:

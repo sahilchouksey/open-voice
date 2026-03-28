@@ -8,7 +8,9 @@ from open_voice_runtime.app.bootstrap import bootstrap_runtime
 from open_voice_runtime.session.models import SessionCreateRequest
 from open_voice_runtime.transport.http.presenter import (
     engine_descriptor_payload,
+    session_history_entry_payload,
     session_state_payload,
+    session_turn_payload,
 )
 from open_voice_runtime.transport.websocket.handler import RealtimeConnectionHandler
 
@@ -36,6 +38,19 @@ class RuntimeServer:
     async def get_session(self, session_id: str) -> dict[str, object]:
         state = await self.dependencies.session_manager.get(session_id)
         return session_state_payload(state)
+
+    async def list_sessions(self, *, limit: int | None = None) -> list[dict[str, object]]:
+        states = await self.dependencies.session_manager.list(limit=limit)
+        return [session_history_entry_payload(state) for state in states]
+
+    async def list_session_turns(
+        self,
+        session_id: str,
+        *,
+        limit: int | None = None,
+    ) -> list[dict[str, object]]:
+        turns = await self.dependencies.session_manager.list_turns(session_id, limit=limit)
+        return [session_turn_payload(turn) for turn in turns]
 
     async def close_session(self, session_id: str) -> None:
         await self.dependencies.session_manager.close(session_id)

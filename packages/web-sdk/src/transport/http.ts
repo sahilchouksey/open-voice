@@ -1,4 +1,10 @@
-import type { RuntimeConfigPayload, EngineCatalogResponse, SessionState } from "../protocol"
+import type {
+  RuntimeConfigPayload,
+  EngineCatalogResponse,
+  SessionHistoryEntry,
+  SessionState,
+  SessionTurnEntry,
+} from "../protocol"
 
 export interface RuntimeHttpClientOptions {
   baseUrl: string
@@ -46,8 +52,22 @@ export class RuntimeHttpClient {
     return this.request<SessionState>(`/v1/sessions/${sessionId}`)
   }
 
+  async listSessions(limit?: number): Promise<SessionHistoryEntry[]> {
+    const query = typeof limit === "number" && Number.isFinite(limit)
+      ? `?limit=${Math.max(1, Math.floor(limit))}`
+      : ""
+    return this.request<SessionHistoryEntry[]>(`/v1/sessions${query}`)
+  }
+
   async closeSession(sessionId: string): Promise<void> {
     await this.request<void>(`/v1/sessions/${sessionId}`, { method: "DELETE" })
+  }
+
+  async listSessionTurns(sessionId: string, limit?: number): Promise<SessionTurnEntry[]> {
+    const query = typeof limit === "number" && Number.isFinite(limit)
+      ? `?limit=${Math.max(1, Math.floor(limit))}`
+      : ""
+    return this.request<SessionTurnEntry[]>(`/v1/sessions/${sessionId}/turns${query}`)
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
