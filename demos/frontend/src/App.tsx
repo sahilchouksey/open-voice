@@ -225,14 +225,13 @@ function meaningfulWordTokens(text: string): string[] {
 
 function isInterruptWorthyPartial(text: string): boolean {
   const trimmed = text.trim()
-  if (trimmed.length < 4) return false
+  if (trimmed.length < 2) return false
 
   const tokens = meaningfulWordTokens(trimmed)
   if (tokens.length === 0) return false
 
   const nonFillerTokens = tokens.filter((token) => !FILLER_PARTIAL_TOKENS.has(token))
-  if (nonFillerTokens.length >= 2) return true
-  return nonFillerTokens.length === 1 && nonFillerTokens[0].length >= 3
+  return nonFillerTokens.length >= DEMO_INTERRUPT_MIN_WORDS
 }
 
 function isInterruptWorthyVad(event: VadStateEvent): boolean {

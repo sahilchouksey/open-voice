@@ -97,10 +97,10 @@ Just voice in, intelligence out.
         │                                     │
         ▼                                     │
     You listen ───► You interrupt? ───────────┘
-        │                  
-        ▼                  
-   Continue or                
-    ask more                 
+        │                                     |                  
+        ▼                                     | 
+   Continue or                                | 
+    ask more                                  | 
         │                    
         └─────────────────────────────────────┘
 ```
