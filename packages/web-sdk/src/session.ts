@@ -123,7 +123,8 @@ export class WebVoiceSession {
     interruptCurrent?: boolean
     reason?: string
   }): void {
-    if (opts.interruptCurrent) {
+    const shouldInterruptCurrent = opts.interruptCurrent ?? true
+    if (shouldInterruptCurrent) {
       this.interrupt(opts.reason ?? "generate_reply")
     }
     const message: AgentGenerateReplyMessage = {

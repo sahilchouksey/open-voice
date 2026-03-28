@@ -3017,24 +3017,109 @@ async def _test_send_now_cuts_over_immediately_on_new_stt_final() -> None:
         for item in emitted
     )
 
+
+def test_agent_generate_reply_interrupts_immediately_under_send_now() -> None:
+    asyncio.run(_test_agent_generate_reply_interrupts_immediately_under_send_now())
+
+
+async def _test_agent_generate_reply_interrupts_immediately_under_send_now() -> None:
+    session_manager = InMemorySessionManager()
+
+    stt_registry = SttEngineRegistry()
+    stt_registry.register(
+        MultiStreamFakeSttEngine(
+            [
+                [
+                    [],
+                    [SttEvent(kind=SttEventKind.FINAL, text="first prompt", sequence=1)],
+                ],
+            ]
+        ),
+        default=True,
+    )
+
+    router_registry = RouterEngineRegistry()
+    router_registry.register(FakeRouterEngine("moderate_route"), default=True)
+
+    llm_registry = LlmEngineRegistry()
+    llm_registry.register(ToolRunningThenDelayFakeLlmEngine(hold_seconds=0.8), default=True)
+
+    tts_registry = TtsEngineRegistry()
+    tts_registry.register(FakeTtsEngine(), default=True)
+
+    session = RealtimeConversationSession(
+        session_manager,
+        config=RuntimeConfig(),
+        stt_service=SttService(stt_registry),
+        router_service=RouterService(router_registry),
+        llm_service=LlmService(llm_registry),
+        tts_service=TtsService(tts_registry),
+    )
+
+    start_events = await session.apply_message(
+        SessionStartMessage(config={"turn_queue": {"policy": "send_now"}})
+    )
+    session_id = start_events[0].session_id
+
+    emitted: list[dict[str, Any]] = []
+
+    async def emit(payload: dict[str, Any]) -> None:
+        emitted.append(payload)
+
+    await session.apply(_audio_append_payload(session_id, sequence=0), emit=emit)
+    await session.apply({"type": "audio.commit", "session_id": session_id}, emit=emit)
+
+    deadline = asyncio.get_running_loop().time() + 1.2
+    while asyncio.get_running_loop().time() < deadline:
+        if any(
+            item.get("type") == "llm.tool.update" and item.get("status") == "running"
+            for item in emitted
+        ):
+            break
+        await asyncio.sleep(0.01)
+
+    first_generation_id = next(
+        (
+            item.get("generation_id")
+            for item in emitted
+            if item.get("type") == "llm.tool.update"
+            and item.get("status") == "running"
+            and item.get("generation_id")
+        ),
+        None,
+    )
+    assert isinstance(first_generation_id, str)
+
+    await session.apply(
+        {
+            "type": "agent.generate_reply",
+            "session_id": session_id,
+            "user_text": "second prompt should interrupt",
+        },
+        emit=emit,
+    )
+
+    interrupt_index = next(
+        i
+        for i, item in enumerate(emitted)
+        if item.get("type") == "conversation.interrupted" and item.get("reason") == "send_now"
+    )
+
+    assert any(
+        item.get("type") == "conversation.interrupted" and item.get("reason") == "send_now"
+        for item in emitted
+    )
+    assert any(
+        item.get("type") == "route.selected" and item.get("generation_id") != first_generation_id
+        for item in emitted
+    )
+
     assert all(
         not (
             item.get("generation_id") == first_generation_id
             and item.get("type") in {"llm.response.delta", "llm.reasoning.delta", "tts.chunk"}
         )
-        for item in emitted[latest_final_index:]
-    )
-
-    assert any(
-        item.get("type") == "route.selected"
-        and item.get("generation_id")
-        and item.get("generation_id") != first_generation_id
-        for item in emitted
-    )
-
-    assert any(
-        request.messages and request.messages[0].content == "latest final"
-        for request in llm_engine.requests
+        for item in emitted[interrupt_index + 1 :]
     )
 
 

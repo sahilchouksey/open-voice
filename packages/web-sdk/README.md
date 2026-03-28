@@ -53,6 +53,7 @@ The SDK now supports first-class speaking and interruption helpers:
 
 - `session.say(text, { interruptCurrent?: boolean, reason?: string })`
 - `session.generateReply({ userText, ..., interruptCurrent?: boolean, reason?: string })`
+  - defaults to interrupting active response (`interruptCurrent` defaults to `true`)
 - `session.interrupt(reason?)`
 
 For output playback, pass an audio adapter in `connectSession`:
