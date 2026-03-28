@@ -117,7 +117,7 @@ const DEMO_PENDING_TURN_SLOW_MS = 2000
 const DEMO_PENDING_TURN_DEGRADED_MS = 8000
 const DEMO_PENDING_TURN_TIMEOUT_MS = 25000
 const DEMO_GENERATION_WATCHDOG_TIMEOUT_MS = 30000
-const DEMO_STT_FINAL_TIMEOUT_MS = 1200
+const DEMO_STT_FINAL_TIMEOUT_MS = 800
 const DEMO_ROUTER_MODE: "disabled" | "fallback_only" | "enabled" = "fallback_only"
 const DEMO_PHASE_DEBOUNCE_MS = 180
 const DEMO_FORCE_SEND_NOW_DEFAULT = true
@@ -1386,7 +1386,6 @@ export function App() {
     if (event.type === "stt.partial") {
       const partialTurnId = event.turn_id ?? null
       const partialGenerationId = typeof event.generation_id === "string" ? event.generation_id : null
-      const bypassTrackGuards = effectiveQueuePolicy === "send_now"
       const canRotateSttTrack =
         !pendingTurnStartedAtRef.current
         && (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready")
@@ -1402,7 +1401,7 @@ export function App() {
         && partialTurnId
         && partialTurnId !== sttCurrentTurnIdRef.current
       ) {
-        if (!canRotateSttTrack && !bypassTrackGuards) {
+        if (!canRotateSttTrack) {
           return
         }
         sttCurrentTurnIdRef.current = null
@@ -1413,7 +1412,7 @@ export function App() {
         && partialGenerationId
         && partialGenerationId !== sttCurrentGenerationIdRef.current
       ) {
-        if (!canRotateSttTrack && !bypassTrackGuards) {
+        if (!canRotateSttTrack) {
           return
         }
         sttCurrentTurnIdRef.current = null
@@ -1475,7 +1474,6 @@ export function App() {
       }
       const incomingGenerationId = typeof event.generation_id === "string" ? event.generation_id : null
       const incomingTurnId = event.turn_id ?? null
-      const bypassTrackGuards = effectiveQueuePolicy === "send_now"
       const canRotateSttTrack =
         !pendingTurnStartedAtRef.current
         && (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready")
@@ -1488,7 +1486,7 @@ export function App() {
         && incomingTurnId
         && incomingTurnId !== sttCurrentTurnIdRef.current
       ) {
-        if (!canRotateSttTrack && !bypassTrackGuards) {
+        if (!canRotateSttTrack) {
           return
         }
         sttCurrentTurnIdRef.current = null
@@ -1499,7 +1497,7 @@ export function App() {
         && incomingGenerationId
         && incomingGenerationId !== sttCurrentGenerationIdRef.current
       ) {
-        if (!canRotateSttTrack && !bypassTrackGuards) {
+        if (!canRotateSttTrack) {
           return
         }
         sttCurrentTurnIdRef.current = null
