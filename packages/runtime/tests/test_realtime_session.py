@@ -3983,5 +3983,179 @@ async def _test_slow_stt_chained_revisions_produce_single_stable_turn_without_os
     assert router_engine.requests[0].user_text == "something about socrates not god i do not"
 
 
+def test_send_now_second_turn_commit_timeout_is_reduced() -> None:
+    asyncio.run(_test_send_now_second_turn_commit_timeout_is_reduced())
+
+
+async def _test_send_now_second_turn_commit_timeout_is_reduced() -> None:
+    session_manager = InMemorySessionManager()
+
+    stt_registry = SttEngineRegistry()
+    stt_registry.register(
+        MultiStreamFakeSttEngine(
+            [
+                [
+                    [],
+                    [SttEvent(kind=SttEventKind.FINAL, text="first turn", sequence=1)],
+                ],
+                [
+                    [],
+                    [SttEvent(kind=SttEventKind.FINAL, text="second turn", sequence=1)],
+                ],
+            ]
+        ),
+        default=True,
+    )
+
+    session = RealtimeConversationSession(
+        session_manager,
+        config=RuntimeConfig(),
+        stt_service=SttService(stt_registry),
+    )
+
+    start_events = await session.apply_message(
+        SessionStartMessage(
+            config={
+                "turn_queue": {"policy": "send_now"},
+                "stt": {"final_timeout_ms": 1000},
+                "turn_detection": {"mode": "manual"},
+            }
+        )
+    )
+    session_id = start_events[0].session_id
+
+    await session.apply_message(_audio_append_message(session_id, sequence=0))
+    await session.apply_message(AudioCommitMessage(session_id=session_id))
+
+    await session.apply_message(_audio_append_message(session_id, sequence=1))
+    second_events = await session.apply_message(AudioCommitMessage(session_id=session_id))
+
+    assert not any(event.type == "error" for event in second_events)
+    assert any(event.type == "stt.final" for event in second_events)
+
+
+class AlwaysEmptyFakeSttStream(BaseSttStream):
+    async def push_audio(self, chunk: AudioChunk) -> None:
+        return None
+
+    async def flush(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def drain(self, wait_seconds: float = 0.0) -> list[SttEvent]:
+        return []
+
+    async def events(self):
+        if False:
+            yield SttEvent(kind=SttEventKind.PARTIAL, text="", sequence=0)
+
+
+class MultiStreamEmptySttEngine(BaseSttEngine):
+    id = "fake-stt-empty"
+    label = "Multi Stream Empty STT"
+    capabilities = SttCapabilities()
+
+    async def load(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def create_stream(self, config: SttConfig) -> BaseSttStream:
+        return AlwaysEmptyFakeSttStream()
+
+    async def transcribe_file(self, request: SttFileRequest) -> SttFileResult:
+        return SttFileResult(text="")
+
+
+def test_send_now_second_turn_timeout_wait_is_shorter_than_first_turn() -> None:
+    asyncio.run(_test_send_now_second_turn_timeout_wait_is_shorter_than_first_turn())
+
+
+async def _test_send_now_second_turn_timeout_wait_is_shorter_than_first_turn() -> None:
+    session_manager = InMemorySessionManager()
+    stt_registry = SttEngineRegistry()
+    stt_registry.register(MultiStreamEmptySttEngine(), default=True)
+
+    session = RealtimeConversationSession(
+        session_manager,
+        config=RuntimeConfig(),
+        stt_service=SttService(stt_registry),
+    )
+
+    start_events = await session.apply_message(
+        SessionStartMessage(
+            config={
+                "turn_queue": {"policy": "send_now"},
+                "stt": {"final_timeout_ms": 1000},
+                "turn_detection": {"mode": "manual"},
+            }
+        )
+    )
+    session_id = start_events[0].session_id
+
+    await session.apply_message(_audio_append_message(session_id, sequence=0))
+    first_emitted: list[dict[str, Any]] = []
+
+    async def emit_first(payload: dict[str, Any]) -> None:
+        first_emitted.append(payload)
+
+    first_started = asyncio.get_running_loop().time()
+    await session.apply(
+        {
+            "type": "audio.commit",
+            "session_id": session_id,
+            "client_turn_id": "ct-turn-1",
+        },
+        emit=emit_first,
+    )
+    first_elapsed = asyncio.get_running_loop().time() - first_started
+
+    await session.apply_message(_audio_append_message(session_id, sequence=1))
+    second_emitted: list[dict[str, Any]] = []
+
+    async def emit_second(payload: dict[str, Any]) -> None:
+        second_emitted.append(payload)
+
+    second_started = asyncio.get_running_loop().time()
+    await session.apply(
+        {
+            "type": "audio.commit",
+            "session_id": session_id,
+            "client_turn_id": "ct-turn-2",
+        },
+        emit=emit_second,
+    )
+    second_elapsed = asyncio.get_running_loop().time() - second_started
+
+    first_timeout_error = next(
+        item
+        for item in first_emitted
+        if item.get("type") == "error"
+        and item.get("details", {}).get("timeout_kind") == "stt_final_timeout"
+    )
+    second_timeout_error = next(
+        item
+        for item in second_emitted
+        if item.get("type") == "error"
+        and item.get("details", {}).get("timeout_kind") == "stt_final_timeout"
+    )
+
+    assert first_timeout_error.get("details", {}).get("timeout_ms") == 1000
+    assert second_timeout_error.get("details", {}).get("timeout_ms") <= 800
+    assert first_elapsed - second_elapsed >= 0.12
+
+    assert any(
+        item.get("type") == "turn.accepted" and item.get("client_turn_id") == "ct-turn-1"
+        for item in first_emitted
+    )
+    assert any(
+        item.get("type") == "turn.accepted" and item.get("client_turn_id") == "ct-turn-2"
+        for item in second_emitted
+    )
+
+
 def event_types(events: list[Any]) -> list[str]:
     return [event.type for event in events]

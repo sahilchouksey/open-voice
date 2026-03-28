@@ -8,7 +8,13 @@ export default defineConfig({
   root: demoRoot,
   server: {
     host: true,
-    allowedHosts: [".ngrok-free.app", ".ts.net"],
+    allowedHosts: [
+      ".ngrok-free.app",
+      ".ts.net",
+      "open-voice.sahilchouksey.in",
+      "open-voice-backend.sahilchouksey.in",
+      ".sahilchouksey.in",
+    ],
     proxy: {
       "/v1": {
         target: runtimeProxyTarget,

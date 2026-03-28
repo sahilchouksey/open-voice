@@ -1386,6 +1386,7 @@ export function App() {
     if (event.type === "stt.partial") {
       const partialTurnId = event.turn_id ?? null
       const partialGenerationId = typeof event.generation_id === "string" ? event.generation_id : null
+      const sendNowRelaxedRotation = effectiveQueuePolicy === "send_now"
       const canRotateSttTrack =
         !pendingTurnStartedAtRef.current
         && (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready")
@@ -1401,7 +1402,7 @@ export function App() {
         && partialTurnId
         && partialTurnId !== sttCurrentTurnIdRef.current
       ) {
-        if (!canRotateSttTrack) {
+        if (!canRotateSttTrack && !sendNowRelaxedRotation) {
           return
         }
         sttCurrentTurnIdRef.current = null
@@ -1412,7 +1413,7 @@ export function App() {
         && partialGenerationId
         && partialGenerationId !== sttCurrentGenerationIdRef.current
       ) {
-        if (!canRotateSttTrack) {
+        if (!canRotateSttTrack && !sendNowRelaxedRotation) {
           return
         }
         sttCurrentTurnIdRef.current = null
@@ -1474,6 +1475,7 @@ export function App() {
       }
       const incomingGenerationId = typeof event.generation_id === "string" ? event.generation_id : null
       const incomingTurnId = event.turn_id ?? null
+      const sendNowRelaxedRotation = effectiveQueuePolicy === "send_now"
       const canRotateSttTrack =
         !pendingTurnStartedAtRef.current
         && (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready")
@@ -1486,7 +1488,7 @@ export function App() {
         && incomingTurnId
         && incomingTurnId !== sttCurrentTurnIdRef.current
       ) {
-        if (!canRotateSttTrack) {
+        if (!canRotateSttTrack && !sendNowRelaxedRotation) {
           return
         }
         sttCurrentTurnIdRef.current = null
@@ -1497,7 +1499,7 @@ export function App() {
         && incomingGenerationId
         && incomingGenerationId !== sttCurrentGenerationIdRef.current
       ) {
-        if (!canRotateSttTrack) {
+        if (!canRotateSttTrack && !sendNowRelaxedRotation) {
           return
         }
         sttCurrentTurnIdRef.current = null

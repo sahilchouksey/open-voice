@@ -204,6 +204,7 @@ class RealtimeConversationSession:
         self._turn_entered_processing_at: dict[
             str, float
         ] = {}  # session_id -> timestamp when turn entered THINKING/PROCESSING
+        self._session_speech_turn_count: dict[str, int] = {}
         self._client_turn_attempts: dict[str, dict[str, int]] = {}
         self._tool_speech_announcements: dict[
             str, dict[tuple[str, str], float]
@@ -333,6 +334,8 @@ class RealtimeConversationSession:
         interrupted_on_this_append = False
         preserved_final_text: str | None = None
         seeded_final_segments_count = 0
+        interrupt_cfg = _interruption_config(state)
+        recent_send_now_interrupt = False
 
         if state.status is SessionStatus.INTERRUPTED:
             status_events.extend(
@@ -348,7 +351,6 @@ class RealtimeConversationSession:
         # or when there's an active generation in progress (e.g., during routing phase)
         if self._should_handle_interruption(state):
             policy = _turn_queue_policy(state)
-            interrupt_cfg = _interruption_config(state)
             strict_speaking_barge_in = (
                 policy == TURN_QUEUE_POLICY_SEND_NOW and state.status is SessionStatus.SPEAKING
             )
@@ -542,6 +544,7 @@ class RealtimeConversationSession:
         ):
             latest_final_text = _final_text_from_stt_events(stt_events)
             policy = _turn_queue_policy(state)
+            interrupt_cfg = _interruption_config(state)
             if policy == TURN_QUEUE_POLICY_SEND_NOW:
                 min_duration_seconds = max(0.0, float(interrupt_cfg.get("min_duration", 0.0)))
                 sustained_ready = True
@@ -657,6 +660,7 @@ class RealtimeConversationSession:
         # After an interrupt, we buffer audio but don't commit until VAD shows END_OF_SPEECH.
         in_post_interrupt_collecting = self._post_interrupt_collecting.get(state.session_id, False)
         send_now_policy = _turn_queue_policy(state) == TURN_QUEUE_POLICY_SEND_NOW
+        turn_count = self._session_speech_turn_count.get(state.session_id, 0)
         if in_post_interrupt_collecting and send_now_policy:
             # send_now must stay low-latency after barge-in; do not gate on VAD end.
             self._post_interrupt_collecting.pop(state.session_id, None)
@@ -758,8 +762,17 @@ class RealtimeConversationSession:
                 now=now,
             )
             force_commit_without_vad_end = stt_idle_ready
+            non_first_turn_fast_commit = (
+                turn_count > 1
+                and bool(result.final_text and result.final_text.strip())
+                and len(result.final_text.strip()) >= 4
+            )
 
-            if not vad_ended and not force_commit_without_vad_end:
+            if (
+                not vad_ended
+                and not force_commit_without_vad_end
+                and not non_first_turn_fast_commit
+            ):
                 # Don't auto-commit yet, wait for VAD end
                 logger.info(
                     "AUTO-COMMIT: Deferred - waiting for VAD end in post-interrupt mode",
@@ -787,7 +800,11 @@ class RealtimeConversationSession:
                         "final_text": result.final_text,
                         "stt_events_count": len(stt_events),
                         "commit_reason": (
-                            "stt_idle_fallback" if force_commit_without_vad_end else "vad_end"
+                            "stt_idle_fallback"
+                            if force_commit_without_vad_end
+                            else "non_first_turn_fast_commit"
+                            if non_first_turn_fast_commit
+                            else "vad_end"
                         ),
                         "stt_idle_seconds": stt_idle_seconds,
                         "stt_idle_threshold": stt_idle_threshold,
@@ -1050,6 +1067,9 @@ class RealtimeConversationSession:
         if emit_accepted_events:
             await _emit_conversation_events(emit, accepted_events)
 
+        turn_count = self._session_speech_turn_count.get(state.session_id, 0) + 1
+        self._session_speech_turn_count[state.session_id] = turn_count
+
         transcribing_status_events: list[ConversationEvent] = []
         if can_transition(state.status, SessionStatus.TRANSCRIBING):
             transcribing_status_events = await self._transition_session(
@@ -1062,8 +1082,12 @@ class RealtimeConversationSession:
         if stream is not None:
             self._stt_commit_started_at[state.session_id] = asyncio.get_running_loop().time()
             commit_wait_seconds = (
-                0.2 if has_buffered_final_text else _stt_final_timeout_seconds(state)
+                0.2
+                if has_buffered_final_text
+                else _stt_final_timeout_seconds(state, turn_count=turn_count)
             )
+            if turn_count > 1:
+                commit_wait_seconds = min(commit_wait_seconds, 0.8)
             stabilization_seconds = _stt_stabilization_seconds(state)
             await stream.flush()
             wait_started_at = asyncio.get_running_loop().time()
@@ -2060,6 +2084,7 @@ class RealtimeConversationSession:
         self._stt_commit_started_at.pop(message.session_id, None)
         self._barge_in_speech_started_at.pop(message.session_id, None)
         self._turn_entered_processing_at.pop(message.session_id, None)
+        self._session_speech_turn_count.pop(message.session_id, None)
         self._client_turn_attempts.pop(message.session_id, None)
         return [SessionClosedEvent(message.session_id)]
 
@@ -2196,6 +2221,8 @@ class RealtimeConversationSession:
 
         policy = _turn_queue_policy(state)
         send_now_policy = policy == TURN_QUEUE_POLICY_SEND_NOW
+        cooldown_cfg = _interruption_config(state)
+        cooldown_seconds = cooldown_cfg.get("cooldown_ms", 1000) / 1000.0
 
         # Check 1: Continuous speech protection (2 second window after interrupt)
         last_interrupt = self._last_interrupt_at.get(session_id, 0)
@@ -2261,8 +2288,6 @@ class RealtimeConversationSession:
             return False
 
         # Check 4: Cooldown period
-        cooldown_cfg = _interruption_config(state)
-        cooldown_seconds = cooldown_cfg.get("cooldown_ms", 1000) / 1000.0
         in_cooldown = time_since_interrupt < cooldown_seconds
         decision_context["cooldown_seconds"] = cooldown_seconds
         decision_context["in_cooldown"] = in_cooldown
@@ -4061,15 +4086,20 @@ def _router_mode(state: SessionState) -> str:
     return "enabled"
 
 
-def _stt_final_timeout_seconds(state: SessionState) -> float:
+def _stt_final_timeout_seconds(state: SessionState, *, turn_count: int | None = None) -> float:
     runtime_config = state.metadata.get("runtime_config", {})
     if isinstance(runtime_config, dict):
         stt_cfg = runtime_config.get("stt", {})
         if isinstance(stt_cfg, dict):
             timeout_ms = _safe_int(stt_cfg.get("final_timeout_ms"), DEFAULT_STT_FINAL_TIMEOUT_MS)
             timeout_ms = max(200, timeout_ms)
+            if turn_count is not None and turn_count > 1:
+                timeout_ms = max(350, int(timeout_ms * 0.6))
             return timeout_ms / 1000.0
-    return DEFAULT_STT_FINAL_TIMEOUT_MS / 1000.0
+    timeout_ms = DEFAULT_STT_FINAL_TIMEOUT_MS
+    if turn_count is not None and turn_count > 1:
+        timeout_ms = max(350, int(timeout_ms * 0.6))
+    return timeout_ms / 1000.0
 
 
 def _stt_stabilization_seconds(state: SessionState) -> float:
