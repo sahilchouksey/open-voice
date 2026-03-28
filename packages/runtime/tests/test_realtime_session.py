@@ -4157,5 +4157,107 @@ async def _test_send_now_second_turn_timeout_wait_is_shorter_than_first_turn() -
     )
 
 
+def test_send_now_interrupts_on_partial_when_vad_start_missing() -> None:
+    asyncio.run(_test_send_now_interrupts_on_partial_when_vad_start_missing())
+
+
+async def _test_send_now_interrupts_on_partial_when_vad_start_missing() -> None:
+    session_manager = InMemorySessionManager()
+    stt_registry = SttEngineRegistry()
+    stt_registry.register(
+        MultiStreamFakeSttEngine(
+            [
+                [
+                    [],
+                    [SttEvent(kind=SttEventKind.FINAL, text="first", sequence=1)],
+                ],
+                [
+                    [SttEvent(kind=SttEventKind.PARTIAL, text="please stop now", sequence=2)],
+                    [],
+                ],
+            ]
+        ),
+        default=True,
+    )
+
+    vad_registry = VadEngineRegistry()
+    vad_registry.register(
+        FakeVadEngine(
+            [
+                [
+                    VadEvent(
+                        kind=VadEventKind.START_OF_SPEECH,
+                        sequence=0,
+                        timestamp_ms=0.0,
+                    )
+                ],
+                [
+                    VadEvent(
+                        kind=VadEventKind.INFERENCE,
+                        sequence=1,
+                        speaking=False,
+                        probability=0.1,
+                        timestamp_ms=40.0,
+                    )
+                ],
+            ]
+        ),
+        default=True,
+    )
+
+    router_registry = RouterEngineRegistry()
+    router_registry.register(FakeRouterEngine("moderate_route"), default=True)
+    llm_registry = LlmEngineRegistry()
+    llm_registry.register(EchoDelayedFakeLlmEngine(delay_seconds=0.04), default=True)
+    tts_registry = TtsEngineRegistry()
+    tts_registry.register(FakeTtsEngine(complete_delay_seconds=0.3), default=True)
+
+    session = RealtimeConversationSession(
+        session_manager,
+        config=RuntimeConfig(),
+        stt_service=SttService(stt_registry),
+        vad_service=VadService(vad_registry),
+        router_service=RouterService(router_registry),
+        llm_service=LlmService(llm_registry),
+        tts_service=TtsService(tts_registry),
+    )
+
+    start_events = await session.apply_message(
+        SessionStartMessage(config={"turn_queue": {"policy": "send_now"}})
+    )
+    session_id = start_events[0].session_id
+
+    emitted: list[dict[str, Any]] = []
+
+    async def emit(payload: dict[str, Any]) -> None:
+        emitted.append(payload)
+
+    await session.apply(_audio_append_payload(session_id, sequence=0), emit=emit)
+    await session.apply({"type": "audio.commit", "session_id": session_id}, emit=emit)
+
+    async def _wait_for_first_tts_chunk(timeout_seconds: float = 1.5) -> str:
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        while asyncio.get_running_loop().time() < deadline:
+            for item in emitted:
+                if item.get("type") == "tts.chunk" and item.get("generation_id"):
+                    generation_id = item.get("generation_id")
+                    if isinstance(generation_id, str):
+                        return generation_id
+            await asyncio.sleep(0.01)
+        raise AssertionError("Timed out waiting for first tts.chunk event")
+
+    first_generation_id = await _wait_for_first_tts_chunk()
+
+    await session.apply(_audio_append_payload(session_id, sequence=1), emit=emit)
+    await asyncio.sleep(0.25)
+
+    assert any(
+        item.get("type") == "conversation.interrupted"
+        and item.get("reason") == "send_now"
+        and item.get("generation_id") == first_generation_id
+        for item in emitted
+    )
+
+
 def event_types(events: list[Any]) -> list[str]:
     return [event.type for event in events]

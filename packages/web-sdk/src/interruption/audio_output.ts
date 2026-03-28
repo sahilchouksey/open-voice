@@ -29,13 +29,33 @@ export function extractTtsChunk(event: ConversationEvent): TtsChunk | null {
 export class SessionAudioController {
   private readonly gate = new GenerationEventGate()
   private eventChain: Promise<void> = Promise.resolve()
+  private interruptionEpoch = 0
 
   constructor(private readonly output: AudioOutputAdapter) {}
 
   private enqueue(operation: () => Promise<void>): Promise<void> {
-    const run = this.eventChain.then(operation, operation)
+    const epoch = this.interruptionEpoch
+    const guarded = async () => {
+      if (epoch !== this.interruptionEpoch) {
+        return
+      }
+      await operation()
+    }
+    const run = this.eventChain.then(guarded, guarded)
     this.eventChain = run.catch(() => undefined)
     return run
+  }
+
+  private async preemptAndFlush(reason: string): Promise<void> {
+    this.gate.rejectActiveGeneration()
+    this.interruptionEpoch += 1
+
+    const pending = this.eventChain.catch(() => undefined)
+    this.eventChain = Promise.resolve()
+
+    await this.output.flush(reason).catch(() => undefined)
+    await pending
+    await this.output.flush(`${reason}.settle`).catch(() => undefined)
   }
 
   shouldAccept(event: ConversationEvent): boolean {
@@ -43,6 +63,18 @@ export class SessionAudioController {
   }
 
   async onEvent(event: ConversationEvent): Promise<void> {
+    if (event.type === "conversation.interrupted") {
+      this.gate.observe(event)
+      await this.preemptAndFlush("conversation.interrupted")
+      return
+    }
+
+    if (event.type === "llm.error") {
+      this.gate.observe(event)
+      await this.preemptAndFlush("llm.error")
+      return
+    }
+
     return this.enqueue(async () => {
       try {
         if (!this.gate.shouldAccept(event)) {
@@ -50,17 +82,6 @@ export class SessionAudioController {
         }
 
         this.gate.observe(event)
-
-        if (event.type === "conversation.interrupted") {
-          await this.output.flush("conversation.interrupted")
-          return
-        }
-
-        if (event.type === "llm.error") {
-          this.gate.rejectActiveGeneration()
-          await this.output.flush("llm.error")
-          return
-        }
 
         const ttsChunk = extractTtsChunk(event)
         if (ttsChunk) {
@@ -79,10 +100,7 @@ export class SessionAudioController {
   }
 
   async interrupt(reason?: string): Promise<void> {
-    this.gate.rejectActiveGeneration()
-    await this.enqueue(async () => {
-      await this.output.flush(reason ?? "interrupt")
-    })
+    await this.preemptAndFlush(reason ?? "interrupt")
   }
 
   reset(): void {

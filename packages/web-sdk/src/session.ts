@@ -24,7 +24,7 @@ export class WebVoiceSession {
   input?: AudioInputAdapter
   state: VoiceSessionState
   private readonly stateListeners = new Set<(state: VoiceSessionState) => void>()
-  private readonly audioController?: SessionAudioController
+  private readonly audioController?: SessionAudioControllerImpl
 
   constructor(
     sessionId: string,
@@ -139,14 +139,14 @@ export class WebVoiceSession {
   }
 
   interrupt(reason?: string): void {
-    if (this.audioController) {
-      void this.audioController.interrupt(reason)
-    }
     this.socket.send({
       type: "conversation.interrupt",
       session_id: this.sessionId,
       reason,
     })
+    if (this.audioController) {
+      void this.audioController.interrupt(reason)
+    }
   }
 
   updateConfig(config: RuntimeSessionConfig): void {

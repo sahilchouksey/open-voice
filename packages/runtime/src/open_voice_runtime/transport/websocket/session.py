@@ -205,6 +205,7 @@ class RealtimeConversationSession:
             str, float
         ] = {}  # session_id -> timestamp when turn entered THINKING/PROCESSING
         self._session_speech_turn_count: dict[str, int] = {}
+        self._recent_stt_partial_text: dict[str, str] = {}
         self._client_turn_attempts: dict[str, dict[str, int]] = {}
         self._tool_speech_announcements: dict[
             str, dict[tuple[str, str], float]
@@ -330,6 +331,7 @@ class RealtimeConversationSession:
         state = await self._sessions.get(message.session_id)
         status_events: list[ConversationEvent] = []
         chunk = _audio_chunk_from_message(message)
+        policy = _turn_queue_policy(state)
         pre_commit_vad_events: list[VadEvent] | None = None
         interrupted_on_this_append = False
         preserved_final_text: str | None = None
@@ -428,10 +430,10 @@ class RealtimeConversationSession:
                 pre_commit_vad_events, min_probability=min_probability
             )
 
-            # In strict barge-in mode, require explicit START_OF_SPEECH only when
-            # no sustained-speech guard is configured.
+            # In send_now speaking mode, require explicit START_OF_SPEECH to avoid
+            # false barge-ins from noisy inference-only VAD spikes.
             min_duration_seconds = max(0.0, float(interrupt_cfg.get("min_duration", 0.0)))
-            require_explicit_barge_start = strict_speaking_barge_in and min_duration_seconds <= 0.0
+            require_explicit_barge_start = strict_speaking_barge_in
             if require_explicit_barge_start and not _contains_vad_barge_in_start(
                 pre_commit_vad_events
             ):
@@ -454,6 +456,7 @@ class RealtimeConversationSession:
 
             if not has_speech and policy != TURN_QUEUE_POLICY_SEND_NOW:
                 return status_events
+
             if not has_speech and policy == TURN_QUEUE_POLICY_SEND_NOW:
                 logger.debug(
                     "Deferring send_now interrupt until sustained speech is detected "
@@ -524,6 +527,36 @@ class RealtimeConversationSession:
             for event in stt_events
         )
 
+        latest_partial_text = _latest_partial_text_from_stt_events(stt_events)
+        if latest_partial_text:
+            self._recent_stt_partial_text[state.session_id] = latest_partial_text
+        else:
+            self._recent_stt_partial_text.pop(state.session_id, None)
+
+        if (
+            policy == TURN_QUEUE_POLICY_SEND_NOW
+            and self._has_active_generation(state.session_id)
+            and not recent_send_now_interrupt
+            and not interrupted_on_this_append
+        ):
+            min_words_for_partial_interrupt = max(2, int(interrupt_cfg.get("min_words", 1)))
+            partial_words = _count_meaningful_words(
+                self._recent_stt_partial_text.get(state.session_id)
+            )
+            if partial_words >= min_words_for_partial_interrupt:
+                self._preempt_active_generation(state.session_id)
+                interrupt_events = await self._interrupt(
+                    ConversationInterruptMessage(
+                        session_id=message.session_id,
+                        reason="send_now",
+                    )
+                )
+                status_events.extend(interrupt_events)
+                self._turns.clear_buffer(message.session_id)
+                state = await self._sessions.get(message.session_id)
+                pre_commit_vad_events = None
+                interrupted_on_this_append = True
+
         if stt_events:
             self._last_user_activity_at[state.session_id] = asyncio.get_running_loop().time()
 
@@ -577,10 +610,6 @@ class RealtimeConversationSession:
                             rapid_window_min_words,
                             latest_final_text,
                         )
-                        # If no generation is active anymore, prepare immediate
-                        # replacement commit on this final to avoid stalling.
-                        # But when a live generation is active, short follow-ups
-                        # inside cooldown should be ignored (no re-interrupt).
                         if not self._has_active_generation(state.session_id):
                             interrupted_on_this_append = True
                             self._turns.clear_buffer(message.session_id)
@@ -590,6 +619,14 @@ class RealtimeConversationSession:
                                     message.session_id
                                 )
                     else:
+                        logger.debug(
+                            "Processing rapid send_now STT final session=%s dt=%.3fs words=%s required=%s text=%r",
+                            state.session_id,
+                            time_since_interrupt,
+                            latest_words,
+                            rapid_window_min_words,
+                            latest_final_text,
+                        )
                         self._preempt_active_generation(state.session_id)
                         interrupt_events = await self._interrupt(
                             ConversationInterruptMessage(
@@ -1607,6 +1644,7 @@ class RealtimeConversationSession:
         # Clear STT final tracking after interrupt - CRITICAL: prevents old STT final from blocking new turns
         self._last_stt_final_at.pop(state.session_id, None)
         self._last_stt_final_text.pop(state.session_id, None)
+        self._recent_stt_partial_text.pop(state.session_id, None)
         self._stt_commit_started_at.pop(state.session_id, None)
         self._client_turn_attempts.pop(state.session_id, None)
 
@@ -2085,6 +2123,7 @@ class RealtimeConversationSession:
         self._barge_in_speech_started_at.pop(message.session_id, None)
         self._turn_entered_processing_at.pop(message.session_id, None)
         self._session_speech_turn_count.pop(message.session_id, None)
+        self._recent_stt_partial_text.pop(message.session_id, None)
         self._client_turn_attempts.pop(message.session_id, None)
         return [SessionClosedEvent(message.session_id)]
 
@@ -3880,6 +3919,13 @@ def _final_text_from_stt_events(stt_events: list[SttEvent]) -> str | None:
     if not parts:
         return None
     return " ".join(parts)
+
+
+def _latest_partial_text_from_stt_events(stt_events: list[SttEvent]) -> str | None:
+    for event in reversed(stt_events):
+        if event.kind is SttEventKind.PARTIAL and event.text.strip():
+            return event.text
+    return None
 
 
 def _count_meaningful_words(text: str | None) -> int:
