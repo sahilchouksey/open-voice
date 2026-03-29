@@ -510,9 +510,15 @@ button:disabled {
   width: 100%;
   display: flex;
   justify-content: center;
-  margin-top: 4px;
+  margin-top: 12px;
   margin-bottom: 2px;
   z-index: 2;
+}
+
+@media (min-width: 1280px) {
+  .minimal-mic-dock {
+    margin-top: 20px;
+  }
 }
 
 .minimal-mic-btn {

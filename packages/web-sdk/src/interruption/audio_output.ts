@@ -47,6 +47,7 @@ export class SessionAudioController {
   }
 
   private async preemptAndFlush(reason: string): Promise<void> {
+    const preemptedGenerationId = this.gate.currentGenerationId
     this.gate.rejectActiveGeneration()
     this.interruptionEpoch += 1
 
@@ -55,6 +56,11 @@ export class SessionAudioController {
 
     await this.output.flush(reason).catch(() => undefined)
     await pending
+
+    if (this.gate.currentGenerationId !== preemptedGenerationId) {
+      return
+    }
+
     await this.output.flush(`${reason}.settle`).catch(() => undefined)
   }
 

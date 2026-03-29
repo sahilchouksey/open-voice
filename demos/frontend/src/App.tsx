@@ -126,7 +126,7 @@ const DEMO_SLOW_STT_STABILIZATION_MS = 160
 const DEMO_MIC_STOP_COMMIT_GRACE_MS = 900
 const DEMO_AUTO_COMMIT_MIN_INTERVAL_MS = 400
 const DEMO_ROUTER_TIMEOUT_MS = 7000
-const DEMO_CAPTURE_BUFFER_SIZE = 512
+const DEMO_CAPTURE_BUFFER_SIZE = 4096
 const DEMO_PENDING_TURN_SLOW_MS = 2000
 const DEMO_PENDING_TURN_DEGRADED_MS = 8000
 const DEMO_PENDING_TURN_TIMEOUT_MS = 25000
@@ -138,7 +138,12 @@ const DEMO_ROUTER_MODE: "disabled" | "fallback_only" | "enabled" = "fallback_onl
 const DEMO_PHASE_DEBOUNCE_MS = 180
 const DEMO_FORCE_SEND_NOW_DEFAULT = true
 const DEMO_DISABLE_STT_STABILIZATION = false
-const DEMO_EVENT_TRACE_MAX_ITEMS = 220
+const DEMO_EVENT_TRACE_MAX_ITEMS = 80
+const DEMO_EVENT_TRACE_FLUSH_MS = 120
+const DEMO_UI_STT_TEXT_THROTTLE_MS = 80
+const DEMO_UI_LLM_DELTA_THROTTLE_MS = 80
+const DEMO_UI_MIC_LEVEL_THROTTLE_MS = 80
+const DEMO_UI_BAND_INTERVAL_MS = 80
 
 const DEMO_SEND_NOW_RUNTIME_OWNED_COMMIT = true
 const MINIMAL_CAPTIONS_STORAGE_KEY = "openvoice.minimal.captions"
@@ -336,7 +341,7 @@ class BrowserMicInput {
     this.bandTimer = window.setInterval(() => {
       if (!this.analyser) return
       this.onBands(computeAnalyserBands(this.analyser, AUDIO_BAND_COUNT))
-    }, 32)
+    }, DEMO_UI_BAND_INTERVAL_MS)
   }
 
   async stop(): Promise<void> {
@@ -389,7 +394,7 @@ class PcmLevelTap {
       this.bandTimer = window.setInterval(() => {
         if (!this.analyser) return
         this.onBands(computeAnalyserBands(this.analyser, this.bandCount))
-      }, 32)
+      }, DEMO_UI_BAND_INTERVAL_MS)
     }
   }
 
@@ -558,7 +563,7 @@ function envFlag(value: unknown, defaultValue = false): boolean {
 
 const FRONTEND_DIAGNOSTICS_ENABLED = envFlag(
   import.meta.env.VITE_OPEN_VOICE_FRONTEND_DIAGNOSTICS,
-  import.meta.env.DEV,
+  false,
 )
 
 function isLoopbackHost(hostname: string): boolean {
@@ -897,6 +902,20 @@ export function App() {
   const localBargeInCooldownUntilRef = useRef(0)
   const localBargeInNoiseFloorRef = useRef(0)
   const allowAutoInterruptUntilRef = useRef(0)
+  const eventChainRef = useRef<Promise<void>>(Promise.resolve())
+  const eventBufferRef = useRef<string[]>([])
+  const eventFlushTimerRef = useRef<number | null>(null)
+  const sttUiTextRef = useRef("")
+  const sttUiLastPaintAtRef = useRef(0)
+  const sttUiTimerRef = useRef<number | null>(null)
+  const llmThinkingUiTextRef = useRef("")
+  const llmThinkingUiLastPaintAtRef = useRef(0)
+  const llmThinkingUiTimerRef = useRef<number | null>(null)
+  const llmResponseUiLastPaintAtRef = useRef(0)
+  const llmResponseUiTimerRef = useRef<number | null>(null)
+  const micLevelUiLastPaintAtRef = useRef(0)
+  const micLevelUiPendingRef = useRef(0)
+  const micLevelUiTimerRef = useRef<number | null>(null)
 
   const canConnect = !sessionRef.current
   const micButtonVisualState: "off" | "on" | "hold" = isMicHoldActive
@@ -1372,16 +1391,172 @@ export function App() {
     llmThinkingActiveRef.current = llmThinkingActive
   }, [llmThinkingActive])
 
+  const clearEventFlushTimer = useCallback(() => {
+    if (eventFlushTimerRef.current !== null) {
+      window.clearTimeout(eventFlushTimerRef.current)
+      eventFlushTimerRef.current = null
+    }
+  }, [])
+
+  const flushEventBuffer = useCallback(() => {
+    clearEventFlushTimer()
+    if (eventBufferRef.current.length === 0) {
+      return
+    }
+    const batch = eventBufferRef.current
+    eventBufferRef.current = []
+    setEvents((prev) => {
+      const next = [...prev, ...batch]
+      return next.length > DEMO_EVENT_TRACE_MAX_ITEMS
+        ? next.slice(-DEMO_EVENT_TRACE_MAX_ITEMS)
+        : next
+    })
+  }, [clearEventFlushTimer])
+
+  const queueEventLine = useCallback((line: string) => {
+    eventBufferRef.current.push(line)
+    if (eventBufferRef.current.length >= DEMO_EVENT_TRACE_MAX_ITEMS) {
+      flushEventBuffer()
+      return
+    }
+    if (eventFlushTimerRef.current !== null) {
+      return
+    }
+    eventFlushTimerRef.current = window.setTimeout(() => {
+      eventFlushTimerRef.current = null
+      flushEventBuffer()
+    }, DEMO_EVENT_TRACE_FLUSH_MS)
+  }, [flushEventBuffer])
+
+  const clearSttUiTimer = useCallback(() => {
+    if (sttUiTimerRef.current !== null) {
+      window.clearTimeout(sttUiTimerRef.current)
+      sttUiTimerRef.current = null
+    }
+  }, [])
+
+  const flushSttUiText = useCallback(() => {
+    clearSttUiTimer()
+    sttUiLastPaintAtRef.current = Date.now()
+    setSttLiveText(sttUiTextRef.current)
+  }, [clearSttUiTimer])
+
+  const queueSttUiText = useCallback((text: string, immediate = false) => {
+    sttUiTextRef.current = text
+    const now = Date.now()
+    const elapsed = now - sttUiLastPaintAtRef.current
+    if (immediate || elapsed >= DEMO_UI_STT_TEXT_THROTTLE_MS) {
+      flushSttUiText()
+      return
+    }
+    if (sttUiTimerRef.current !== null) {
+      return
+    }
+    sttUiTimerRef.current = window.setTimeout(() => {
+      sttUiTimerRef.current = null
+      flushSttUiText()
+    }, DEMO_UI_STT_TEXT_THROTTLE_MS - elapsed)
+  }, [flushSttUiText])
+
+  const clearLlmThinkingUiTimer = useCallback(() => {
+    if (llmThinkingUiTimerRef.current !== null) {
+      window.clearTimeout(llmThinkingUiTimerRef.current)
+      llmThinkingUiTimerRef.current = null
+    }
+  }, [])
+
+  const flushLlmThinkingUiText = useCallback(() => {
+    clearLlmThinkingUiTimer()
+    llmThinkingUiLastPaintAtRef.current = Date.now()
+    setLlmThinkingText(llmThinkingUiTextRef.current)
+  }, [clearLlmThinkingUiTimer])
+
+  const queueLlmThinkingUiText = useCallback((immediate = false) => {
+    const now = Date.now()
+    const elapsed = now - llmThinkingUiLastPaintAtRef.current
+    if (immediate || elapsed >= DEMO_UI_LLM_DELTA_THROTTLE_MS) {
+      flushLlmThinkingUiText()
+      return
+    }
+    if (llmThinkingUiTimerRef.current !== null) {
+      return
+    }
+    llmThinkingUiTimerRef.current = window.setTimeout(() => {
+      llmThinkingUiTimerRef.current = null
+      flushLlmThinkingUiText()
+    }, DEMO_UI_LLM_DELTA_THROTTLE_MS - elapsed)
+  }, [flushLlmThinkingUiText])
+
+  const clearLlmResponseUiTimer = useCallback(() => {
+    if (llmResponseUiTimerRef.current !== null) {
+      window.clearTimeout(llmResponseUiTimerRef.current)
+      llmResponseUiTimerRef.current = null
+    }
+  }, [])
+
+  const flushLlmResponseUiText = useCallback(() => {
+    clearLlmResponseUiTimer()
+    llmResponseUiLastPaintAtRef.current = Date.now()
+    setLlmResponseText(llmResponseTextRef.current)
+  }, [clearLlmResponseUiTimer])
+
+  const queueLlmResponseUiText = useCallback((immediate = false) => {
+    const now = Date.now()
+    const elapsed = now - llmResponseUiLastPaintAtRef.current
+    if (immediate || elapsed >= DEMO_UI_LLM_DELTA_THROTTLE_MS) {
+      flushLlmResponseUiText()
+      return
+    }
+    if (llmResponseUiTimerRef.current !== null) {
+      return
+    }
+    llmResponseUiTimerRef.current = window.setTimeout(() => {
+      llmResponseUiTimerRef.current = null
+      flushLlmResponseUiText()
+    }, DEMO_UI_LLM_DELTA_THROTTLE_MS - elapsed)
+  }, [flushLlmResponseUiText])
+
+  const clearMicLevelUiTimer = useCallback(() => {
+    if (micLevelUiTimerRef.current !== null) {
+      window.clearTimeout(micLevelUiTimerRef.current)
+      micLevelUiTimerRef.current = null
+    }
+  }, [])
+
+  const flushMicLevelUi = useCallback(() => {
+    clearMicLevelUiTimer()
+    micLevelUiLastPaintAtRef.current = Date.now()
+    setMicLevel(micLevelUiPendingRef.current)
+  }, [clearMicLevelUiTimer])
+
+  const queueMicLevelUi = useCallback((nextLevel: number, immediate = false) => {
+    micLevelUiPendingRef.current = nextLevel
+    const now = Date.now()
+    const elapsed = now - micLevelUiLastPaintAtRef.current
+    if (immediate || elapsed >= DEMO_UI_MIC_LEVEL_THROTTLE_MS) {
+      flushMicLevelUi()
+      return
+    }
+    if (micLevelUiTimerRef.current !== null) {
+      return
+    }
+    micLevelUiTimerRef.current = window.setTimeout(() => {
+      micLevelUiTimerRef.current = null
+      flushMicLevelUi()
+    }, DEMO_UI_MIC_LEVEL_THROTTLE_MS - elapsed)
+  }, [flushMicLevelUi])
+
   const resetAssistantPanels = useCallback((turnId?: string | null) => {
     const normalizedTurnId = turnId ?? null
     if (normalizedTurnId && activeAssistantTurnIdRef.current === normalizedTurnId) {
       return
     }
     activeAssistantTurnIdRef.current = normalizedTurnId
+    llmThinkingUiTextRef.current = ""
     llmResponseTextRef.current = ""
-    setLlmThinkingText("")
-    setLlmResponseText("")
-  }, [])
+    flushLlmThinkingUiText()
+    flushLlmResponseUiText()
+  }, [flushLlmResponseUiText, flushLlmThinkingUiText])
 
   const clearSpeechWatchdog = useCallback(() => {
     if (speechWatchdogTimerRef.current !== null) {
@@ -1460,10 +1635,14 @@ export function App() {
     return true
   }, [clearPendingTurnTimer])
 
+  const pushTraceLocal = useCallback((type: string, payload: unknown, kind = "ui.action") => {
+    traceReporterRef.current?.trackLocal(type, payload, kind)
+  }, [])
+
   const markPendingTurnResolved = useCallback((via: string) => {
     const startedAt = pendingTurnStartedAtRef.current
     if (startedAt) {
-      traceReporterRef.current?.trackLocal(
+      pushTraceLocal(
         "ui.pending_turn.resolved",
         {
           via,
@@ -1473,12 +1652,12 @@ export function App() {
       )
     }
     clearPendingTurn()
-  }, [clearPendingTurn])
+  }, [clearPendingTurn, pushTraceLocal])
 
   const markPendingTurnCancelled = useCallback((reason: string) => {
     const startedAt = pendingTurnStartedAtRef.current
     if (startedAt) {
-      traceReporterRef.current?.trackLocal(
+      pushTraceLocal(
         "ui.pending_turn.cancelled",
         {
           reason,
@@ -1488,7 +1667,7 @@ export function App() {
       )
     }
     clearPendingTurn()
-  }, [clearPendingTurn])
+  }, [clearPendingTurn, pushTraceLocal])
 
   const pendingTurnMessage = useMemo(() => {
     if (pendingTurnPhase === "idle") {
@@ -1596,15 +1775,15 @@ export function App() {
   }, [])
 
   const hardStopPlayback = useCallback(async () => {
-    traceReporterRef.current?.trackLocal("audio.output.flush", { reason: "hard_stop" }, "audio")
+    pushTraceLocal("audio.output.flush", { reason: "hard_stop" }, "audio")
     rejectGeneration(activeGenerationIdRef.current)
     await sdkPlayerRef.current?.flush().catch(() => undefined)
     thinkingPlayerRef.current?.stop()
-  }, [rejectGeneration])
+  }, [pushTraceLocal, rejectGeneration])
 
   const hardStopPlaybackNow = useCallback(() => {
     const epoch = ++interruptionEpochRef.current
-    traceReporterRef.current?.trackLocal(
+    pushTraceLocal(
       "audio.output.flush_now",
       { reason: "interrupt_now", epoch },
       "audio",
@@ -1620,7 +1799,7 @@ export function App() {
     void sdkPlayerRef.current?.flush().catch(() => undefined)
     setLlmThinkingActive(false)
     setTurnPhaseStable(sessionRef.current && micRef.current ? "listening" : "idle")
-  }, [rejectGeneration, setTurnPhaseStable])
+  }, [pushTraceLocal, rejectGeneration, setTurnPhaseStable])
 
   const startGenerationWatchdog = useCallback((generationId: string) => {
     clearGenerationWatchdog()
@@ -1673,7 +1852,7 @@ export function App() {
         : source === "stt_partial"
           ? "ui.auto_interrupt.stt_partial"
           : "ui.auto_interrupt.local_audio"
-    traceReporterRef.current?.trackLocal(
+    pushTraceLocal(
       interruptEventName,
       {
         session_id: session.sessionId,
@@ -1683,7 +1862,7 @@ export function App() {
     )
     hardStopPlaybackNow()
     session.interrupt("barge_in")
-  }, [hardStopPlaybackNow, rejectGeneration])
+  }, [hardStopPlaybackNow, pushTraceLocal, rejectGeneration])
 
   const activeGridBands = useMemo(() => {
     return turnPhase === "agent_speaking" ? ttsBands : micBands
@@ -1740,8 +1919,8 @@ export function App() {
       return
     }
     const rendered = formatEventForPanel(event)
-    setEvents((prev) => [...prev.slice(-(DEMO_EVENT_TRACE_MAX_ITEMS - 1)), rendered])
-  }, [mode])
+    queueEventLine(rendered)
+  }, [mode, queueEventLine])
 
   const handleEvent = useCallback(async (event: ConversationEvent) => {
     const shouldAutoBargeInterrupt = effectiveQueuePolicy === "send_now"
@@ -1775,7 +1954,7 @@ export function App() {
       if (eventGenerationId && rejectedGenerationIdsRef.current.has(eventGenerationId)) {
         return
       }
-      traceReporterRef.current?.trackLocal(
+      pushTraceLocal(
         "ui.session.status",
         {
           status: event.status,
@@ -1993,7 +2172,7 @@ export function App() {
         markPendingTurnResolved("stt.partial")
       }
       const partialText = event.text || ""
-      setSttLiveText(partialText)
+      queueSttUiText(partialText)
       const hasPartialText = partialText.trim().length > 0
       if (hasPartialText) {
         lastUserSpeechAtRef.current = Date.now()
@@ -2024,7 +2203,7 @@ export function App() {
         && !interruptionInFlightRef.current
         && isInterruptWorthyPartial(partialText)
       ) {
-        traceReporterRef.current?.trackLocal(
+        pushTraceLocal(
           "ui.auto_interrupt.stt_partial_candidate",
           {
             session_id: sessionRef.current?.sessionId ?? null,
@@ -2099,7 +2278,7 @@ export function App() {
           triggerImmediateInterrupt("stt_partial")
         }
       }
-      setSttLiveText(event.text || "")
+      queueSttUiText(event.text || "", true)
       setRouteName("routing")
       setRouteProvider(null)
       setRouteModel(null)
@@ -2190,8 +2369,9 @@ export function App() {
       }
       resetAssistantPanels(event.turn_id || null)
       setLlmThinkingActive(true)
+      llmThinkingUiTextRef.current += event.delta || ""
       if (mode !== "minimal") {
-        setLlmThinkingText((prev) => prev + (event.delta || ""))
+        queueLlmThinkingUiText()
       }
       if (!ttsPlayingRef.current && !ttsStreamActiveRef.current) {
         setTurnPhaseStable("processing")
@@ -2219,7 +2399,7 @@ export function App() {
         .replace(/`/g, "")
       llmResponseTextRef.current += cleanDelta
       if (mode !== "minimal") {
-        setLlmResponseText((prev) => prev + cleanDelta)
+        queueLlmResponseUiText()
       }
       if (ttsPlayingRef.current || ttsStreamActiveRef.current) {
         setTurnPhaseStable("agent_speaking")
@@ -2250,7 +2430,7 @@ export function App() {
       if (event.text.trim()) {
         llmResponseTextRef.current = event.text
         if (mode !== "minimal") {
-          setLlmResponseText(event.text)
+          queueLlmResponseUiText(true)
         }
         setTranscript((prev) => {
           const next = [...prev, { role: "assistant", text: event.text }]
@@ -2397,12 +2577,22 @@ export function App() {
     markPendingTurnCancelled,
     markPendingTurnResolved,
     effectiveQueuePolicy,
+    pushTraceLocal,
+    queueLlmResponseUiText,
+    queueLlmThinkingUiText,
+    queueSttUiText,
     rejectGeneration,
     resetAssistantPanels,
     startPendingTurn,
     startSpeechWatchdog,
     triggerImmediateInterrupt,
   ])
+
+  const handleEventSequenced = useCallback((event: ConversationEvent) => {
+    eventChainRef.current = eventChainRef.current
+      .then(() => handleEvent(event))
+      .catch(() => undefined)
+  }, [handleEvent])
 
   const startListening = useCallback(async () => {
     if (!sessionRef.current || isDisconnectingRef.current) return
@@ -2414,14 +2604,14 @@ export function App() {
     if (!window.isSecureContext) {
       throw new Error("Microphone requires HTTPS (or localhost).")
     }
-    traceReporterRef.current?.trackLocal("ui.start_listening", {
+    pushTraceLocal("ui.start_listening", {
       session_id: sessionRef.current.sessionId,
     })
     const mic = new BrowserMicInput(
       (chunk) => sessionRef.current?.sendAudio(chunk),
       (level) => {
         const normalizedLevel = Math.max(0, level)
-        setMicLevel(Math.min(100, Math.round(level * 140)))
+        queueMicLevelUi(Math.min(100, Math.round(level * 140)))
 
         if (effectiveQueuePolicy !== "send_now") {
           localBargeInFramesRef.current = 0
@@ -2468,7 +2658,7 @@ export function App() {
         if (normalizedLevel >= dynamicThreshold) {
           localBargeInFramesRef.current += 1
           if (localBargeInFramesRef.current >= DEMO_LOCAL_BARGE_IN_CONSECUTIVE_FRAMES) {
-            traceReporterRef.current?.trackLocal(
+            pushTraceLocal(
               "ui.auto_interrupt.local_audio",
               {
                 session_id: sessionRef.current?.sessionId ?? null,
@@ -2488,7 +2678,7 @@ export function App() {
         setMicBands(bands)
       },
       (meta) => {
-        traceReporterRef.current?.trackLocal("audio.input.chunk", meta, "audio.chunk")
+        pushTraceLocal("audio.input.chunk", meta, "audio.chunk")
       },
     )
     await mic.start()
@@ -2501,11 +2691,17 @@ export function App() {
     if (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready") {
       setTurnPhaseStable("listening")
     }
-  }, [effectiveQueuePolicy, setTurnPhaseStable, triggerImmediateInterrupt])
+  }, [
+    effectiveQueuePolicy,
+    pushTraceLocal,
+    queueMicLevelUi,
+    setTurnPhaseStable,
+    triggerImmediateInterrupt,
+  ])
 
   const stopListening = useCallback(async () => {
     const lifecycleToken = ++micLifecycleTokenRef.current
-    traceReporterRef.current?.trackLocal("ui.stop_listening", {
+    pushTraceLocal("ui.stop_listening", {
       session_id: sessionRef.current?.sessionId ?? null,
     })
     const mic = micRef.current
@@ -2513,7 +2709,7 @@ export function App() {
 
     setIsListening(false)
     setIsMicHoldActive(false)
-    setMicLevel(0)
+    queueMicLevelUi(0, true)
     setMicBands(zeroBands())
     localBargeInFramesRef.current = 0
     localBargeInCooldownUntilRef.current = 0
@@ -2539,7 +2735,7 @@ export function App() {
       const clientTurnId = `ct_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
       const started = startPendingTurn(clientTurnId)
       if (started) {
-        traceReporterRef.current?.trackLocal(
+        pushTraceLocal(
           "ui.pending_turn.start",
           {
             trigger: "mic_stop_commit",
@@ -2577,7 +2773,7 @@ export function App() {
       return
     }
     setTurnPhaseStable("idle")
-  }, [setTurnPhaseStable, startPendingTurn])
+  }, [pushTraceLocal, queueMicLevelUi, setTurnPhaseStable, startPendingTurn])
 
   const handleMinimalMicToggle = useCallback(async () => {
     if (!sessionRef.current) {
@@ -2642,7 +2838,7 @@ export function App() {
 
   const disconnect = useCallback(async () => {
     isDisconnectingRef.current = true
-    traceReporterRef.current?.trackLocal("ui.disconnect", {
+    pushTraceLocal("ui.disconnect", {
       session_id: sessionRef.current?.sessionId ?? null,
     })
     clearPendingTurn()
@@ -2677,10 +2873,20 @@ export function App() {
     setSelectedHistorySessionId(null)
     setTurnPhaseStable("idle")
     clearGenerationWatchdog()
-    setSttLiveText("")
-    setLlmThinkingText("")
-    setLlmResponseText("")
+    sttUiTextRef.current = ""
+    llmThinkingUiTextRef.current = ""
     llmResponseTextRef.current = ""
+    clearSttUiTimer()
+    clearLlmThinkingUiTimer()
+    clearLlmResponseUiTimer()
+    flushSttUiText()
+    flushLlmThinkingUiText()
+    flushLlmResponseUiText()
+    clearMicLevelUiTimer()
+    queueMicLevelUi(0, true)
+    clearEventFlushTimer()
+    eventBufferRef.current = []
+    setEvents([])
     setRouteName("-")
     setRouteProvider(null)
     setRouteModel(null)
@@ -2699,11 +2905,20 @@ export function App() {
     isDisconnectingRef.current = false
     void refreshSessionHistory({ preserveError: true })
   }, [
+    clearEventFlushTimer,
     clearIdleTransitionTimer,
+    clearLlmResponseUiTimer,
+    clearLlmThinkingUiTimer,
+    clearMicLevelUiTimer,
     clearMicHoldTimer,
     clearPendingTurn,
+    clearSttUiTimer,
     clearGenerationWatchdog,
     clearSpeechWatchdog,
+    flushLlmResponseUiText,
+    flushLlmThinkingUiText,
+    flushSttUiText,
+    queueMicLevelUi,
     refreshSessionHistory,
     setTurnPhaseStable,
     stopListening,
@@ -2775,7 +2990,7 @@ export function App() {
         verifyEngines: false,
         traceReporter,
         onEvent: (event: ConversationEvent) => {
-          void handleEvent(event)
+          handleEventSequenced(event)
         },
       }
 
@@ -2814,10 +3029,20 @@ export function App() {
           ? localSeedTranscript.slice(-SESSION_TRANSCRIPT_LIMIT)
           : [],
       )
+      clearEventFlushTimer()
+      eventBufferRef.current = []
       setEvents([])
-      setLlmThinkingText("")
-      setLlmResponseText("")
+      sttUiTextRef.current = ""
+      clearSttUiTimer()
+      flushSttUiText()
+      llmThinkingUiTextRef.current = ""
       llmResponseTextRef.current = ""
+      clearLlmThinkingUiTimer()
+      clearLlmResponseUiTimer()
+      flushLlmThinkingUiText()
+      flushLlmResponseUiText()
+      clearMicLevelUiTimer()
+      queueMicLevelUi(0, true)
       setRouteName("-")
       setRouteProvider(null)
       setRouteModel(null)
@@ -2875,14 +3100,23 @@ export function App() {
   }, [
     baseUrl,
     checkEngineReadiness,
+    clearEventFlushTimer,
+    clearLlmResponseUiTimer,
+    clearLlmThinkingUiTimer,
+    clearMicLevelUiTimer,
+    clearSttUiTimer,
     clearSpeechWatchdog,
     engineReadiness.checked,
     engineReadiness.message,
     engineReadiness.ok,
-    handleEvent,
+    flushLlmResponseUiText,
+    flushLlmThinkingUiText,
+    flushSttUiText,
+    handleEventSequenced,
     mode,
     effectiveQueuePolicy,
     loadSessionTranscript,
+    queueMicLevelUi,
     requestedSessionId,
     runtimeConfig,
     refreshSessionHistory,
@@ -2941,7 +3175,7 @@ export function App() {
 
   const interrupt = useCallback(() => {
     if (!sessionRef.current) return
-    traceReporterRef.current?.trackLocal("ui.interrupt", { reason: "demo" })
+    pushTraceLocal("ui.interrupt", { reason: "demo" })
     interruptionInFlightRef.current = true
     suppressTtsUntilNextUserFinalRef.current = true
     rejectGeneration(activeGenerationIdRef.current)
@@ -2950,7 +3184,7 @@ export function App() {
     setTurnPhaseStable("idle")
     void hardStopPlayback()
     sessionRef.current.interrupt("demo")
-  }, [clearPendingTurn, hardStopPlayback, rejectGeneration, setTurnPhaseStable])
+  }, [clearPendingTurn, hardStopPlayback, pushTraceLocal, rejectGeneration, setTurnPhaseStable])
 
   useEffect(() => {
     disconnectForCleanupRef.current = disconnect
@@ -3152,12 +3386,26 @@ export function App() {
 
   useEffect(() => {
     return () => {
+      clearEventFlushTimer()
+      clearSttUiTimer()
+      clearLlmThinkingUiTimer()
+      clearLlmResponseUiTimer()
+      clearMicLevelUiTimer()
       clearMicHoldTimer()
       clearIdleTransitionTimer()
       clearSpeechWatchdog()
       void disconnectForCleanupRef.current?.()
     }
-  }, [clearIdleTransitionTimer, clearMicHoldTimer, clearSpeechWatchdog])
+  }, [
+    clearEventFlushTimer,
+    clearIdleTransitionTimer,
+    clearLlmResponseUiTimer,
+    clearLlmThinkingUiTimer,
+    clearMicLevelUiTimer,
+    clearMicHoldTimer,
+    clearSpeechWatchdog,
+    clearSttUiTimer,
+  ])
 
   useEffect(() => {
     return () => {
@@ -3176,11 +3424,32 @@ export function App() {
     if (mode !== "minimal") {
       return
     }
+    clearEventFlushTimer()
+    eventBufferRef.current = []
     setEvents([])
-    setLlmThinkingText("")
-    setLlmResponseText("")
+    sttUiTextRef.current = ""
+    clearSttUiTimer()
+    flushSttUiText()
+    llmThinkingUiTextRef.current = ""
     llmResponseTextRef.current = ""
-  }, [mode])
+    clearLlmThinkingUiTimer()
+    clearLlmResponseUiTimer()
+    flushLlmThinkingUiText()
+    flushLlmResponseUiText()
+    clearMicLevelUiTimer()
+    queueMicLevelUi(0, true)
+  }, [
+    clearEventFlushTimer,
+    clearLlmResponseUiTimer,
+    clearLlmThinkingUiTimer,
+    clearMicLevelUiTimer,
+    clearSttUiTimer,
+    flushLlmResponseUiText,
+    flushLlmThinkingUiText,
+    flushSttUiText,
+    mode,
+    queueMicLevelUi,
+  ])
 
   const radialClass = useMemo(() => {
     if (isMicDisconnectedView) return "idle"
