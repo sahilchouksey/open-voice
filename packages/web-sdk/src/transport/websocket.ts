@@ -5,6 +5,7 @@ export interface RealtimeSocketOptions {
   webSocket?: typeof WebSocket
   onInboundEvent?: (event: ConversationEvent) => void
   onOutboundMessage?: (message: ClientMessage) => void
+  onParseError?: (payload: string, error: unknown) => void
 }
 
 export interface ConnectOptions {
@@ -20,12 +21,14 @@ export class RealtimeConversationSocket {
   listeners = new Set<ConversationListener>()
   readonly onInboundEvent?: (event: ConversationEvent) => void
   readonly onOutboundMessage?: (message: ClientMessage) => void
+  readonly onParseError?: (payload: string, error: unknown) => void
 
   constructor(opts: RealtimeSocketOptions) {
     this.baseUrl = opts.baseUrl
     this.socketCtor = opts.webSocket ?? WebSocket
     this.onInboundEvent = opts.onInboundEvent
     this.onOutboundMessage = opts.onOutboundMessage
+    this.onParseError = opts.onParseError
   }
 
   connect(opts: ConnectOptions = {}): Promise<void> {
@@ -43,7 +46,13 @@ export class RealtimeConversationSocket {
       })
       socket.addEventListener("message", (event) => {
         if (typeof event.data !== "string") return
-        const payload = JSON.parse(event.data) as ConversationEvent
+        let payload: ConversationEvent
+        try {
+          payload = JSON.parse(event.data) as ConversationEvent
+        } catch (error) {
+          this.onParseError?.(event.data, error)
+          return
+        }
         this.onInboundEvent?.(payload)
         for (const listener of this.listeners) listener(payload)
       })

@@ -3,6 +3,7 @@ from __future__ import annotations
 from open_voice_runtime.llm.contracts import LlmEvent, LlmEventKind, LlmOutputLane, LlmToolKind
 from open_voice_runtime.transport.websocket.session import _conversation_events_from_llm
 from open_voice_runtime.llm.engines.opencode import _State
+from open_voice_runtime.llm.engines.opencode import default_opencode_tools
 from open_voice_runtime.llm.engines.opencode import _events
 
 
@@ -269,7 +270,7 @@ def test_events_parse_tool_call_alias_and_emit_tool_update() -> None:
                     "tool": "websearch",
                     "callID": "call_123",
                     "state": {
-                        "input": {"query": "Sahil Chokse"},
+                        "input": {"query": "Sahil Chouksey"},
                         "status": "running",
                     },
                 }
@@ -284,6 +285,7 @@ def test_events_parse_tool_call_alias_and_emit_tool_update() -> None:
     assert event.kind is LlmEventKind.TOOL_UPDATE
     assert event.tool_name == "websearch"
     assert event.call_id == "call_123"
+    assert event.tool_input == {"query": "Sahil Chouksey"}
     assert event.metadata.get("status") == "running"
     assert event.metadata.get("is_mcp") is True
 
@@ -352,6 +354,46 @@ def test_events_emit_tool_updates_for_step_start_and_step_finish() -> None:
     assert finish_events[1].kind is LlmEventKind.USAGE
 
 
+def test_events_do_not_emit_tool_update_for_nameless_step_events() -> None:
+    state = _State(message_roles={"msg-assistant": "assistant"})
+    tools = {"websearch": LlmToolKind.FUNCTION}
+
+    start_events = _events(
+        _payload(
+            "message.part.updated",
+            {
+                "part": {
+                    "sessionID": "sess-1",
+                    "messageID": "msg-assistant",
+                    "id": "step-1",
+                    "type": "step-start",
+                }
+            },
+        ),
+        state,
+        tools,
+    )
+    finish_events = _events(
+        _payload(
+            "message.part.updated",
+            {
+                "part": {
+                    "sessionID": "sess-1",
+                    "messageID": "msg-assistant",
+                    "id": "step-1",
+                    "type": "step-finish",
+                }
+            },
+        ),
+        state,
+        tools,
+    )
+
+    assert start_events == []
+    assert len(finish_events) == 1
+    assert finish_events[0].kind is LlmEventKind.USAGE
+
+
 def test_summary_event_carries_opencode_system_stack_metadata() -> None:
     llm_events = [
         LlmEvent(
@@ -371,3 +413,13 @@ def test_summary_event_carries_opencode_system_stack_metadata() -> None:
     events = _conversation_events_from_llm("sess-1", "turn-1", llm_events)
     summary = next(event for event in events if event.type == "llm.summary")
     assert summary.metadata == {"opencode_system_stack": ["build mode prompt", "runtime prompt"]}
+
+
+def test_default_opencode_tool_uses_builtin_websearch_function_kind() -> None:
+    tools = default_opencode_tools()
+
+    assert len(tools) == 2
+    assert tools[0].name == "websearch"
+    assert tools[0].kind is LlmToolKind.FUNCTION
+    assert tools[1].name == "webfetch"
+    assert tools[1].kind is LlmToolKind.FUNCTION

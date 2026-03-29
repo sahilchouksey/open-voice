@@ -8,6 +8,7 @@ import subprocess
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -35,6 +36,20 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.lower() not in {"0", "false", "no", "off"}
 
 
+def _discover_opencode_directory() -> str | None:
+    explicit = os.getenv("OPEN_VOICE_OPENCODE_DIRECTORY")
+    if explicit is not None:
+        value = explicit.strip()
+        return value or None
+
+    current = Path(os.getcwd()).resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / ".opencode" / "opencode.json").is_file():
+            return str(candidate)
+
+    return str(current)
+
+
 @dataclass(slots=True)
 class OpencodeConfig:
     base_url: str = field(
@@ -42,9 +57,7 @@ class OpencodeConfig:
             "/"
         )
     )
-    directory: str | None = field(
-        default_factory=lambda: os.getenv("OPEN_VOICE_OPENCODE_DIRECTORY", os.getcwd())
-    )
+    directory: str | None = field(default_factory=_discover_opencode_directory)
     workspace: str | None = field(
         default_factory=lambda: os.getenv("OPEN_VOICE_OPENCODE_WORKSPACE")
     )
@@ -89,6 +102,8 @@ class OpencodeClient:
         env = os.environ.copy()
         if self._config.enable_exa:
             env.setdefault("OPENCODE_ENABLE_EXA", "1")
+        else:
+            env.setdefault("OPENCODE_ENABLE_EXA", "0")
 
         self._process = subprocess.Popen(
             [
@@ -189,7 +204,7 @@ class OpencodeClient:
             "parts": [{"type": "text", "text": user_text}],
         }
         if isinstance(mode, str) and mode.strip():
-            body["mode"] = mode.strip()
+            body["agent"] = mode.strip()
 
         response = await self._client.post(
             f"{self._config.base_url}/session/{session_id}/prompt_async",

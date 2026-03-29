@@ -25,28 +25,27 @@ See [`demos/.env.example`](./.env.example) for a template.
 
 ### `.env` — Default Configuration
 
-The base `.env` contains shared provider keys and route targets.
+The base `.env` contains shared non-secret defaults and route targets.
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `DO_AI_API_KEY` | DigitalOcean AI inference API key | `sk-do-...` |
 | `OPEN_VOICE_ROUTE_TARGETS` | JSON array mapping route tiers → LLM models | See below |
 
 **Route targets** define which model handles each complexity tier:
 
 ```json
 [
-  {"llm_engine_id":"opencode","provider":"doai","model":"openai-gpt-oss-120b","profile_id":"trivial_route"},
-  {"llm_engine_id":"opencode","provider":"doai","model":"openai-gpt-oss-120b","profile_id":"simple_route"},
-  {"llm_engine_id":"opencode","provider":"doai","model":"openai-gpt-oss-120b","profile_id":"moderate_route"},
-  {"llm_engine_id":"opencode","provider":"doai","model":"openai-gpt-oss-120b","profile_id":"complex_route"},
-  {"llm_engine_id":"opencode","provider":"doai","model":"openai-gpt-oss-120b","profile_id":"expert_route"}
+  {"llm_engine_id":"opencode","provider":"digitalocean-oss","model":"openai-gpt-oss-120b","profile_id":"trivial_route"},
+  {"llm_engine_id":"opencode","provider":"digitalocean-oss","model":"openai-gpt-oss-120b","profile_id":"simple_route"},
+  {"llm_engine_id":"opencode","provider":"digitalocean-oss","model":"openai-gpt-oss-120b","profile_id":"moderate_route"},
+  {"llm_engine_id":"opencode","provider":"digitalocean-oss","model":"openai-gpt-oss-120b","profile_id":"complex_route"},
+  {"llm_engine_id":"opencode","provider":"digitalocean-oss","model":"openai-gpt-oss-120b","profile_id":"expert_route"}
 ]
 ```
 
 Each entry has:
 - `llm_engine_id` — engine to use (`"opencode"`)
-- `provider` — LLM provider (`"doai"`, `"copilot-proxy"`, etc.)
+- `provider` — LLM provider (`"digitalocean-oss"`, `"copilot-proxy"`, etc.)
 - `model` — model name (provider-specific)
 - `profile_id` — route tier name (used by the router to select a model)
 
@@ -61,6 +60,7 @@ Place your machine-specific settings here. This file is **gitignored** and takes
 | `OPEN_VOICE_ROUTE_TARGETS` | Override the default route map | (from `.env`) |
 | `OPEN_VOICE_OPENCODE_DIRECTORY` | Path to repo root for `.opencode` config | `.` (repo root) |
 | `OPEN_VOICE_OPENCODE_ENABLE_EXA` | Enable Exa web search integration | `0` |
+| `OPENCODE_BASE_URL` | OpenCode server base URL used by runtime | `http://127.0.0.1:4098` in demo backend |
 | `OPEN_VOICE_KOKORO_ONNX_ASSET_DIR` | Path to Kokoro TTS ONNX model directory | `packages/runtime/.models/kokoro-onnx` |
 | `OPEN_VOICE_DEMO_HOST` | Bind address for backend server | `0.0.0.0` |
 | `OPEN_VOICE_DEMO_PORT` | Port for backend server | `8011` |
@@ -140,3 +140,10 @@ The demo frontend uses this mode via `opencode_mode: "voice"` and passes a stric
 If you run OpenCode in this repo, this local `.opencode` mode is discovered automatically and merged with your global config.
 
 The demo backend also sets `OPEN_VOICE_OPENCODE_DIRECTORY` to the repo root so OpenCode resolves project-local `.opencode` config while running from `demos/backend`.
+
+For consistent voice websearch behavior, the demo backend also defaults:
+
+- `OPEN_VOICE_OPENCODE_ENABLE_EXA=1`
+- `OPENCODE_BASE_URL=http://127.0.0.1:4098`
+
+This prevents accidental reuse of stale global OpenCode daemons running on `:4096` with different flags.

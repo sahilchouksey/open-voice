@@ -1,14 +1,29 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react"
 import {
   FrontendTraceReporter,
+  BrowserMicInput as SdkBrowserMicInput,
   OpenVoiceWebClient,
+  InterruptionPolicy,
+  selectPendingTurnState,
+  selectRouteState,
+  selectSttFinalMeta,
+  selectSttProgress,
+  VoiceAgent,
+  selectCurrentSpokenSegment,
+  selectTranscript,
+  selectTurnPhase,
+  SttTrackStateManager,
   toRuntimeConfigPayload,
+  toSetTranscriptAction,
+  computeAnalyserBands,
+  type WebVoiceSession,
   type AudioOutputAdapter,
   type ConversationEvent,
   type SessionHistoryEntry,
   type RuntimeSessionConfig,
   type TtsChunk,
-  type WebVoiceSession,
+  type VoiceAgentSignal,
+  type TranscriptEntry,
 } from "@open-voice/web-sdk"
 import { Button, Card, Input, Label, Select, TabsList, TabsTrigger } from "./components/ui"
 import { GridVisualizer } from "./components/GridVisualizer"
@@ -19,10 +34,7 @@ type TurnPhase = "idle" | "listening" | "user_speaking" | "processing" | "agent_
 
 const MINIMAL_VISUALIZER_STYLE: "radial" | "grid" = "grid"
 
-interface TranscriptItem {
-  role: "user" | "assistant"
-  text: string
-}
+type TranscriptItem = TranscriptEntry
 
 interface SessionConversationHistory {
   sessionId: string
@@ -49,6 +61,118 @@ type PendingTurnPhase =
   | "slow"
   | "degraded"
   | "timeout"
+
+interface DemoSessionState {
+  sessionId: string
+  sessionStatus: string
+  turnPhase: TurnPhase
+  isListening: boolean
+  sttLiveText: string
+  sttProgress: { status: string | null; waitedMs: number | null; attempt: number | null }
+  sttFinalMeta: { revision: number | null; finality: string | null; deferred: boolean | null; previousText: string | null }
+  llmThinkingText: string
+  llmResponseText: string
+  llmThinkingActive: boolean
+  llmResponseCompletedAt: number
+  currentSpokenSegment: string
+  ttsPlaybackActive: boolean
+  ttsStreamActive: boolean
+  routeName: string
+  routeProvider: string | null
+  routeModel: string | null
+  pendingTurnPhase: PendingTurnPhase
+  pendingTurnElapsedMs: number
+  transcript: TranscriptItem[]
+}
+
+type DemoSessionAction =
+  | { type: "setSession"; sessionId: string; sessionStatus: string; turnPhase: TurnPhase; isListening: boolean }
+  | { type: "setTurnPhaseOnly"; turnPhase: TurnPhase }
+  | { type: "setSessionStatusOnly"; sessionStatus: string }
+  | { type: "setSessionIdOnly"; sessionId: string }
+  | { type: "setListeningOnly"; isListening: boolean }
+  | { type: "setSttLiveText"; text: string }
+  | { type: "setSttProgress"; progress: DemoSessionState["sttProgress"] }
+  | { type: "setSttFinalMeta"; meta: DemoSessionState["sttFinalMeta"] }
+  | { type: "setLlmThinking"; text: string; active: boolean }
+  | { type: "setLlmResponse"; text: string }
+  | { type: "setLlmResponseCompletedAt"; at: number }
+  | { type: "setTts"; currentSpokenSegment: string; playbackActive: boolean; streamActive: boolean }
+  | { type: "setCurrentSpokenSegmentOnly"; currentSpokenSegment: string }
+  | { type: "setTtsPlaybackOnly"; playbackActive: boolean }
+  | { type: "setTtsStreamOnly"; streamActive: boolean }
+  | { type: "setRoute"; routeName: string; provider: string | null; model: string | null }
+  | { type: "setPendingTurn"; phase: PendingTurnPhase; elapsedMs: number }
+  | { type: "setTranscript"; transcript: TranscriptItem[] }
+  | { type: "setIsListening"; isListening: boolean }
+
+const initialDemoSessionState: DemoSessionState = {
+  sessionId: "-",
+  sessionStatus: "disconnected",
+  turnPhase: "idle",
+  isListening: false,
+  sttLiveText: "",
+  sttProgress: { status: null, waitedMs: null, attempt: null },
+  sttFinalMeta: { revision: null, finality: null, deferred: null, previousText: null },
+  llmThinkingText: "",
+  llmResponseText: "",
+  llmThinkingActive: false,
+  llmResponseCompletedAt: 0,
+  currentSpokenSegment: "",
+  ttsPlaybackActive: false,
+  ttsStreamActive: false,
+  routeName: "-",
+  routeProvider: null,
+  routeModel: null,
+  pendingTurnPhase: "idle",
+  pendingTurnElapsedMs: 0,
+  transcript: [],
+}
+
+function demoSessionReducer(state: DemoSessionState, action: DemoSessionAction): DemoSessionState {
+  switch (action.type) {
+    case "setSession":
+      return { ...state, sessionId: action.sessionId, sessionStatus: action.sessionStatus, turnPhase: action.turnPhase, isListening: action.isListening }
+    case "setTurnPhaseOnly":
+      return { ...state, turnPhase: action.turnPhase }
+    case "setSessionStatusOnly":
+      return { ...state, sessionStatus: action.sessionStatus }
+    case "setSessionIdOnly":
+      return { ...state, sessionId: action.sessionId }
+    case "setListeningOnly":
+      return { ...state, isListening: action.isListening }
+    case "setSttLiveText":
+      return { ...state, sttLiveText: action.text }
+    case "setSttProgress":
+      return { ...state, sttProgress: action.progress }
+    case "setSttFinalMeta":
+      return { ...state, sttFinalMeta: action.meta }
+    case "setLlmThinking":
+      return { ...state, llmThinkingText: action.text, llmThinkingActive: action.active }
+    case "setLlmResponse":
+      return { ...state, llmResponseText: action.text }
+    case "setLlmResponseCompletedAt":
+      return { ...state, llmResponseCompletedAt: action.at }
+    case "setTts":
+      return { ...state, currentSpokenSegment: action.currentSpokenSegment, ttsPlaybackActive: action.playbackActive, ttsStreamActive: action.streamActive }
+    case "setCurrentSpokenSegmentOnly":
+      return { ...state, currentSpokenSegment: action.currentSpokenSegment }
+    case "setTtsPlaybackOnly":
+      return { ...state, ttsPlaybackActive: action.playbackActive }
+    case "setTtsStreamOnly":
+      return { ...state, ttsStreamActive: action.streamActive }
+    case "setRoute":
+      return { ...state, routeName: action.routeName, routeProvider: action.provider, routeModel: action.model }
+    case "setPendingTurn":
+      return { ...state, pendingTurnPhase: action.phase, pendingTurnElapsedMs: action.elapsedMs }
+    case "setTranscript":
+      return { ...state, transcript: action.transcript }
+    case "setIsListening":
+      return { ...state, isListening: action.isListening }
+    default:
+      return state
+  }
+}
 
 class ThinkingAudioPlayer {
   private readonly audio: HTMLAudioElement
@@ -101,12 +225,10 @@ class ThinkingAudioPlayer {
 }
 
 const AUDIO_BAND_COUNT = 9
-const AUDIO_LO_PASS = 100
-const AUDIO_HI_PASS = 200
 const DEMO_MIN_SPEECH_DURATION_MS = 220
-const DEMO_VAD_ACTIVATION_THRESHOLD = 0.55
+const DEMO_VAD_ACTIVATION_THRESHOLD = 0.48
 const DEMO_UI_VAD_PROBABILITY_THRESHOLD = 0.6
-const DEMO_INTERRUPT_COOLDOWN_MS = 60
+const DEMO_INTERRUPT_COOLDOWN_MS = 350
 const DEMO_INTERRUPT_MIN_DURATION_SECONDS = 0.03
 const DEMO_INTERRUPT_MIN_WORDS = 1
 const DEMO_LOCAL_BARGE_IN_PEAK_THRESHOLD = 0.15
@@ -118,91 +240,39 @@ const DEMO_LOCAL_BARGE_IN_FLOOR_BIAS = 0.04
 const DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT = true
 const DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT = false
 const DEMO_ENABLE_VAD_AUTO_INTERRUPT = false
-const DEMO_STT_TRANSCRIPT_TIMEOUT_MS = 1200
-const DEMO_MIN_SILENCE_DURATION_MS = 260
+const DEMO_STT_TRANSCRIPT_TIMEOUT_MS = 2000
+const DEMO_MIN_SILENCE_DURATION_MS = 1400
 const DEMO_POST_RELEASE_PROCESSING_GRACE_MS = 1400
 const DEMO_IDLE_TRANSITION_DELAY_MS = 220
 const DEMO_SLOW_STT_STABILIZATION_MS = 160
-const DEMO_MIC_STOP_COMMIT_GRACE_MS = 900
+const DEMO_MIC_STOP_COMMIT_GRACE_MS = 1600
 const DEMO_AUTO_COMMIT_MIN_INTERVAL_MS = 400
 const DEMO_ROUTER_TIMEOUT_MS = 7000
 const DEMO_CAPTURE_BUFFER_SIZE = 4096
-const DEMO_PENDING_TURN_SLOW_MS = 2000
-const DEMO_PENDING_TURN_DEGRADED_MS = 8000
-const DEMO_PENDING_TURN_TIMEOUT_MS = 25000
-const DEMO_GENERATION_WATCHDOG_TIMEOUT_MS = 30000
-const DEMO_STT_FINAL_TIMEOUT_MS = 800
-const DEMO_LLM_FIRST_DELTA_TIMEOUT_MS = 45000
-const DEMO_LLM_TOTAL_TIMEOUT_MS = 90000
+const DEMO_GENERATION_WATCHDOG_TIMEOUT_MS = 90000
+const DEMO_STT_FINAL_TIMEOUT_MS = 1600
+const DEMO_LLM_FIRST_DELTA_TIMEOUT_MS = 90000
+const DEMO_LLM_TOTAL_TIMEOUT_MS = 180000
 const DEMO_ROUTER_MODE: "disabled" | "fallback_only" | "enabled" = "fallback_only"
 const DEMO_PHASE_DEBOUNCE_MS = 180
 const DEMO_FORCE_SEND_NOW_DEFAULT = true
 const DEMO_DISABLE_STT_STABILIZATION = false
 const DEMO_EVENT_TRACE_MAX_ITEMS = 80
 const DEMO_EVENT_TRACE_FLUSH_MS = 120
-const DEMO_UI_STT_TEXT_THROTTLE_MS = 80
-const DEMO_UI_LLM_DELTA_THROTTLE_MS = 80
-const DEMO_UI_MIC_LEVEL_THROTTLE_MS = 80
-const DEMO_UI_BAND_INTERVAL_MS = 80
+const DEMO_UI_STT_TEXT_THROTTLE_MS = 16
+const DEMO_UI_LLM_DELTA_THROTTLE_MS = 16
+const DEMO_UI_MIC_LEVEL_THROTTLE_MS = 16
+const DEMO_UI_BAND_INTERVAL_MS = 16
+const DEMO_ERROR_SPEECH_COOLDOWN_MS = 12000
 
-const DEMO_SEND_NOW_RUNTIME_OWNED_COMMIT = true
+const DEMO_SEND_NOW_RUNTIME_OWNED_COMMIT = false
 const MINIMAL_CAPTIONS_STORAGE_KEY = "openvoice.minimal.captions"
 const MINIMAL_DETAIL_STORAGE_KEY = "openvoice.minimal.detail"
-const MINIMAL_CHAT_HISTORY_STORAGE_KEY = "openvoice.minimal.chat_history"
 const LOCAL_SESSION_HISTORY_STORAGE_KEY = "openvoice.session_history.v1"
 const SESSION_HISTORY_LIMIT = 5
 const SESSION_TRANSCRIPT_LIMIT = 50
-const FILLER_PARTIAL_TOKENS = new Set([
-  "uh",
-  "um",
-  "hmm",
-  "mm",
-  "ah",
-  "oh",
-  "er",
-  "erm",
-])
-
 function zeroBands(count = AUDIO_BAND_COUNT): number[] {
   return Array.from({ length: count }, () => 0)
-}
-
-function normalizeDbValue(value: number): number {
-  const minDb = -100
-  const maxDb = -10
-  const clamped = Math.max(minDb, Math.min(maxDb, value))
-  const normalized = 1 - (clamped * -1) / 100
-  return Math.sqrt(normalized)
-}
-
-function computeAnalyserBands(analyser: AnalyserNode, bands: number): number[] {
-  const dataArray = new Float32Array(analyser.frequencyBinCount)
-  analyser.getFloatFrequencyData(dataArray)
-
-  const sliced = dataArray.slice(AUDIO_LO_PASS, AUDIO_HI_PASS)
-  const normalized = sliced.map((value) => {
-    if (value === -Infinity) return 0
-    return normalizeDbValue(value)
-  })
-
-  const totalBins = normalized.length
-  const chunks: number[] = []
-
-  for (let i = 0; i < bands; i += 1) {
-    const startIndex = Math.floor((i * totalBins) / bands)
-    const endIndex = Math.floor(((i + 1) * totalBins) / bands)
-    const chunk = normalized.slice(startIndex, endIndex)
-
-    if (chunk.length === 0) {
-      chunks.push(0)
-      continue
-    }
-
-    const summed = chunk.reduce((acc, val) => acc + val, 0)
-    chunks.push(summed / chunk.length)
-  }
-
-  return chunks
 }
 
 function normalizeSpeechCompare(text: string): string {
@@ -220,152 +290,89 @@ function isLikelyAssistantEcho(partialText: string, assistantText: string): bool
   return assistant.includes(partial)
 }
 
-function meaningfulWordTokens(text: string): string[] {
-  return text
-    .toLowerCase()
-    .split(/\s+/)
-    .map((token) => token.replace(/[^a-z0-9]/g, ""))
-    .filter((token) => token.length >= 2)
-}
-
-function isInterruptWorthyPartial(text: string): boolean {
-  const trimmed = text.trim()
-  if (trimmed.length < 2) return false
-
-  const tokens = meaningfulWordTokens(trimmed)
-  if (tokens.length === 0) return false
-
-  const nonFillerTokens = tokens.filter((token) => !FILLER_PARTIAL_TOKENS.has(token))
-  return nonFillerTokens.length >= DEMO_INTERRUPT_MIN_WORDS
-}
-
-function isInterruptWorthyVad(event: VadStateEvent): boolean {
-  if (event.kind === "start_of_speech") {
-    return true
+function buildSpokenLlmErrorMessage(message: string, code?: string | null): string {
+  const normalized = `${code ?? ""} ${message}`.toLowerCase()
+  if (normalized.includes("rate limit")) {
+    return "I hit a rate limit while generating that response. Please wait a moment and try again."
   }
-  if (event.kind === "inference" && event.speaking === true) {
-    const probability = typeof event.probability === "number" ? event.probability : 0
-    return probability >= 0.72
+  if (normalized.includes("provider_error") || normalized.includes("provider error")) {
+    return "I ran into a provider error while generating that response. Please try again in a moment."
   }
-  return false
+  return "I ran into a language model error while generating that response. Please try again."
 }
 
-class BrowserMicInput {
-  private sequence = 0
-  private ctx: AudioContext | null = null
-  private processor: ScriptProcessorNode | null = null
-  private source: MediaStreamAudioSourceNode | null = null
-  private stream: MediaStream | null = null
-  private analyser: AnalyserNode | null = null
-  private bandTimer: number | null = null
+class DemoMicInput {
+  private readonly mic: SdkBrowserMicInput
   private running = false
   private captureToken = 0
 
-  constructor(private readonly sendChunk: (chunk: {
+  constructor(
+    sendChunk: (chunk: {
+      data: ArrayBuffer
+      sequence: number
+      encoding: "pcm_s16le"
+      sampleRateHz: number
+      channels: number
+      durationMs: number
+    }) => void | Promise<void>,
+    onLevel: (value: number) => void,
+    onBands: (bands: number[]) => void,
+    onChunkMeta?: (meta: {
+      sequence: number
+      sampleRateHz: number
+      channels: number
+      durationMs: number
+      bytes: number
+    }) => void,
+  ) {
+    this.mic = new SdkBrowserMicInput({
+      sampleRateHz: 24000,
+      channels: 1,
+      chunkSize: DEMO_CAPTURE_BUFFER_SIZE,
+      analyserBandCount: AUDIO_BAND_COUNT,
+      analyserBandIntervalMs: DEMO_UI_BAND_INTERVAL_MS,
+      analyserFftSize: 2048,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+      onLevel,
+      onBands,
+      onChunkMeta,
+    })
+    this.sendChunk = sendChunk
+  }
+
+  private readonly sendChunk: (chunk: {
     data: ArrayBuffer
     sequence: number
     encoding: "pcm_s16le"
     sampleRateHz: number
     channels: number
     durationMs: number
-  }) => void | Promise<void>, private readonly onLevel: (value: number) => void, private readonly onBands: (bands: number[]) => void, private readonly onChunkMeta?: (meta: {
-    sequence: number
-    sampleRateHz: number
-    channels: number
-    durationMs: number
-    bytes: number
-  }) => void) {}
+  }) => void | Promise<void>
 
   async start(): Promise<void> {
     const captureToken = ++this.captureToken
     this.running = true
-    this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        sampleRate: { ideal: 24000 },
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    })
-
-    this.ctx = new AudioContext({ sampleRate: 24000 })
-    this.source = this.ctx.createMediaStreamSource(this.stream)
-    this.processor = this.ctx.createScriptProcessor(DEMO_CAPTURE_BUFFER_SIZE, 1, 1)
-    this.analyser = this.ctx.createAnalyser()
-    this.analyser.fftSize = 2048
-    this.analyser.smoothingTimeConstant = 0
-
-    this.processor.onaudioprocess = (event) => {
+    await this.mic.start(async (chunk) => {
       if (!this.running || captureToken !== this.captureToken) {
         return
       }
-      const channel = event.inputBuffer.getChannelData(0)
-      let peak = 0
-      const pcm = new Int16Array(channel.length)
-      for (let i = 0; i < channel.length; i += 1) {
-        const sample = Math.max(-1, Math.min(1, channel[i]))
-        peak = Math.max(peak, Math.abs(sample))
-        pcm[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff
-      }
-      if (!this.running || captureToken !== this.captureToken) {
-        return
-      }
-      const sampleRate = this.ctx?.sampleRate ?? 24000
-      const sequence = this.sequence
-      this.sequence += 1
-      this.onLevel(peak)
-      void Promise.resolve(
-        this.sendChunk({
-          data: pcm.buffer,
-          sequence,
-          encoding: "pcm_s16le",
-          sampleRateHz: sampleRate,
-          channels: 1,
-          durationMs: (pcm.length / sampleRate) * 1000,
-        }),
-      ).catch(() => undefined)
-      this.onChunkMeta?.({
-        sequence,
-        sampleRateHz: sampleRate,
-        channels: 1,
-        durationMs: (pcm.length / sampleRate) * 1000,
-        bytes: pcm.byteLength,
+      await this.sendChunk({
+        data: chunk.data,
+        sequence: chunk.sequence,
+        encoding: chunk.encoding,
+        sampleRateHz: chunk.sampleRateHz,
+        channels: chunk.channels,
+        durationMs: chunk.durationMs ?? 0,
       })
-    }
-
-    this.source.connect(this.processor)
-    this.source.connect(this.analyser)
-    this.processor.connect(this.ctx.destination)
-
-    this.bandTimer = window.setInterval(() => {
-      if (!this.analyser) return
-      this.onBands(computeAnalyserBands(this.analyser, AUDIO_BAND_COUNT))
-    }, DEMO_UI_BAND_INTERVAL_MS)
+    })
   }
 
   async stop(): Promise<void> {
     this.running = false
     this.captureToken += 1
-    if (this.bandTimer !== null) {
-      window.clearInterval(this.bandTimer)
-      this.bandTimer = null
-    }
-    if (this.processor) {
-      this.processor.onaudioprocess = null
-    }
-    this.processor?.disconnect()
-    this.analyser?.disconnect()
-    this.source?.disconnect()
-    this.stream?.getTracks().forEach((track) => track.stop())
-    await this.ctx?.close()
-    this.processor = null
-    this.analyser = null
-    this.source = null
-    this.stream = null
-    this.ctx = null
-    this.onLevel(0)
-    this.onBands(zeroBands())
+    await this.mic.stop()
   }
 }
 
@@ -449,6 +456,7 @@ class VisualizedPcmPlayer implements AudioOutputAdapter {
   }
 
   private markPlaybackActive(active: boolean) {
+    console.log("[AudioOutput] markPlaybackActive:", active)
     this.onPlaybackActiveChange(active)
   }
 
@@ -463,8 +471,12 @@ class VisualizedPcmPlayer implements AudioOutputAdapter {
   }
 
   async appendTtsChunk(chunk: TtsChunk): Promise<void> {
+    console.log("[AudioOutput] appendTtsChunk called, data length:", chunk.data.byteLength, "sampleRate:", chunk.sampleRateHz)
     await this.ensureContext(chunk.sampleRateHz)
-    if (!this.audioContext) return
+    if (!this.audioContext) {
+      console.log("[AudioOutput] no audioContext, returning early")
+      return
+    }
 
     const sampleRate = chunk.sampleRateHz
     const int16 = new Int16Array(
@@ -499,7 +511,8 @@ class VisualizedPcmPlayer implements AudioOutputAdapter {
     await this.tap.appendPcm16(chunk.data, chunk.sampleRateHz)
   }
 
-  async flush(): Promise<void> {
+  async flush(reason?: string): Promise<void> {
+    console.log("[AudioOutput] flush called, reason:", reason, "activeSources:", this.activeSources.size)
     for (const source of this.activeSources) {
       try {
         source.stop()
@@ -526,8 +539,13 @@ const OPENCODE_MODE = "voice"
 const VOICE_LLM_TOOLS = [
   {
     name: "websearch",
-    kind: "mcp" as const,
+    kind: "function" as const,
     description: "Search the web for current information and relevant sources.",
+  },
+  {
+    name: "webfetch",
+    kind: "function" as const,
+    description: "Fetch and read content from a specific web URL.",
   },
 ]
 
@@ -538,9 +556,11 @@ const OPEN_VOICE_SYSTEM_PROMPT = [
   "For current events or other time-sensitive questions, always search the web before answering.",
   "Never guess or rely on stale memory for news, politics, markets, sports, weather, or other live facts.",
   "Use tools when needed, but never expose internal routing, model, or tool implementation details.",
-  "Never speak or read full URLs out loud.",
-  "If referencing a source in speech, say only the domain name.",
-  "Never include protocol path query fragments tracking parameters or full link strings in spoken output.",
+  "Never read full URLs aloud.",
+  "If a source must be spoken, say only the domain name.",
+  "Never include protocol, path, query params, tracking codes, or full link strings in spoken output.",
+  "If the user asks for a link, explain what they will find there while speaking only the domain name.",
+  "If the user explicitly requests the exact link text, say it can be shown on screen but not spoken aloud.",
 ].join(" ")
 
 function envFlag(value: unknown, defaultValue = false): boolean {
@@ -640,11 +660,20 @@ function persistSessionIdToUrl(sessionId: string | null): void {
     url.searchParams.delete("session")
   }
   url.searchParams.delete("session_id")
-  window.history.replaceState(window.history.state, "", url)
+  window.history.replaceState(null, "", url.toString())
 }
 
 function isSessionClosedOrFailed(status: unknown): boolean {
   return status === "closed" || status === "failed"
+}
+
+function isRecoverableResumeErrorMessage(message: string): boolean {
+  const normalized = message.toLowerCase()
+  return normalized.includes("requested session is closed")
+    || normalized.includes("requested session is failed")
+    || normalized.includes("session_not_found")
+    || normalized.includes("was not found")
+    || normalized.includes(" 404")
 }
 
 function resolveStoredFlag(storageKey: string, fallback: boolean): boolean {
@@ -803,28 +832,88 @@ export function App() {
     DEMO_FORCE_SEND_NOW_DEFAULT ? "send_now" : "send_now",
   )
 
-  const [sessionId, setSessionId] = useState("-")
-  const [sessionStatus, setSessionStatus] = useState("disconnected")
-  const [turnPhase, setTurnPhase] = useState<TurnPhase>("idle")
-  const [sttLiveText, setSttLiveText] = useState("")
-  const [llmThinkingText, setLlmThinkingText] = useState("")
-  const [llmResponseText, setLlmResponseText] = useState("")
-  const [routeName, setRouteName] = useState("-")
-  const [routeProvider, setRouteProvider] = useState<string | null>(null)
-  const [routeModel, setRouteModel] = useState<string | null>(null)
+  const [sessionState, dispatchSession] = useReducer(demoSessionReducer, initialDemoSessionState)
+
+  const { sessionId, sessionStatus, turnPhase, isListening, sttLiveText, llmThinkingText, llmResponseText, llmResponseCompletedAt, currentSpokenSegment, routeName, routeProvider, routeModel, transcript, ttsPlaybackActive, ttsStreamActive, llmThinkingActive, pendingTurnPhase, pendingTurnElapsedMs, sttProgress, sttFinalMeta } = sessionState
+
+  const setTurnPhase = useCallback((phase: TurnPhase) => {
+    dispatchSession({ type: "setTurnPhaseOnly", turnPhase: phase })
+  }, [])
+
+  const setSessionId = useCallback((id: string) => {
+    dispatchSession({ type: "setSessionIdOnly", sessionId: id })
+  }, [])
+
+  const setSessionStatus = useCallback((status: string) => {
+    dispatchSession({ type: "setSessionStatusOnly", sessionStatus: status })
+  }, [])
+
+  const setTtsPlaybackActive = useCallback((active: boolean) => {
+    dispatchSession({ type: "setTtsPlaybackOnly", playbackActive: active })
+  }, [])
+
+  const setTtsStreamActive = useCallback((active: boolean) => {
+    dispatchSession({ type: "setTtsStreamOnly", streamActive: active })
+  }, [])
+
+  const setCurrentSpokenSegment = useCallback((segment: string) => {
+    dispatchSession({ type: "setCurrentSpokenSegmentOnly", currentSpokenSegment: segment })
+  }, [])
+
+  const setSttProgressState = useCallback((progress: { status: string | null; waitedMs: number | null; attempt: number | null }) => {
+    dispatchSession({ type: "setSttProgress", progress })
+  }, [])
+
+  const setSttFinalMetaState = useCallback((meta: { revision: number | null; finality: string | null; deferred: boolean | null; previousText: string | null }) => {
+    dispatchSession({ type: "setSttFinalMeta", meta })
+  }, [])
+
+  const setSttLiveText = useCallback((text: string) => {
+    dispatchSession({ type: "setSttLiveText", text })
+  }, [])
+
+  const setLlmThinkingText = useCallback((text: string) => {
+    dispatchSession({ type: "setLlmThinking", text, active: llmThinkingActive })
+  }, [llmThinkingActive])
+
+  const setLlmResponseText = useCallback((text: string) => {
+    dispatchSession({ type: "setLlmResponse", text })
+  }, [])
+
+  const setLlmResponseCompletedAt = useCallback((at: number) => {
+    dispatchSession({ type: "setLlmResponseCompletedAt", at })
+  }, [])
+
+  const setRouteName = useCallback((name: string) => {
+    dispatchSession({ type: "setRoute", routeName: name, provider: routeProvider, model: routeModel })
+  }, [routeProvider, routeModel])
+
+  const setRouteProvider = useCallback((provider: string | null) => {
+    dispatchSession({ type: "setRoute", routeName, provider, model: routeModel })
+  }, [routeName, routeModel])
+
+  const setRouteModel = useCallback((model: string | null) => {
+    dispatchSession({ type: "setRoute", routeName, provider: routeProvider, model })
+  }, [routeName, routeProvider])
+
+  const setPendingTurnPhase = useCallback((phase: PendingTurnPhase) => {
+    dispatchSession({ type: "setPendingTurn", phase, elapsedMs: pendingTurnElapsedMs })
+  }, [pendingTurnElapsedMs])
+
+  const setPendingTurnElapsedMs = useCallback((elapsed: number) => {
+    dispatchSession({ type: "setPendingTurn", phase: pendingTurnPhase, elapsedMs: elapsed })
+  }, [pendingTurnPhase])
+
+  const setLlmThinkingActive = useCallback((active: boolean) => {
+    dispatchSession({ type: "setLlmThinking", text: llmThinkingText, active })
+  }, [llmThinkingText])
+
   const [events, setEvents] = useState<string[]>([])
-  const [transcript, setTranscript] = useState<TranscriptItem[]>([])
-  const [isListening, setIsListening] = useState(false)
   const [micLevel, setMicLevel] = useState(0)
   const [micBands, setMicBands] = useState<number[]>(() => zeroBands())
   const [ttsBands, setTtsBands] = useState<number[]>(() => zeroBands())
-  const [ttsPlaybackActive, setTtsPlaybackActive] = useState(false)
-  const [ttsStreamActive, setTtsStreamActive] = useState(false)
   const [pendingSpeechAfterThinking, setPendingSpeechAfterThinking] = useState(false)
-  const [llmThinkingActive, setLlmThinkingActive] = useState(false)
   const [thinkingHoldUntil, setThinkingHoldUntil] = useState<number>(0)
-  const [pendingTurnPhase, setPendingTurnPhase] = useState<PendingTurnPhase>("idle")
-  const [pendingTurnElapsedMs, setPendingTurnElapsedMs] = useState(0)
   const [isMicHoldActive, setIsMicHoldActive] = useState(false)
   const [minimalSettingsOpen, setMinimalSettingsOpen] = useState(false)
   const [minimalCaptionsEnabled, setMinimalCaptionsEnabled] = useState(() =>
@@ -832,9 +921,6 @@ export function App() {
   )
   const [minimalDetailEnabled, setMinimalDetailEnabled] = useState(() =>
     resolveStoredFlag(MINIMAL_DETAIL_STORAGE_KEY, false),
-  )
-  const [minimalChatHistoryEnabled, setMinimalChatHistoryEnabled] = useState(() =>
-    resolveStoredFlag(MINIMAL_CHAT_HISTORY_STORAGE_KEY, true),
   )
   const [historySidebarOpen, setHistorySidebarOpen] = useState(false)
   const [sessionHistory, setSessionHistory] = useState<SessionConversationHistory[]>(readStoredSessionHistory)
@@ -844,6 +930,7 @@ export function App() {
   const [selectedHistorySessionId, setSelectedHistorySessionId] = useState<string | null>(null)
   const [isSwitchingSession, setIsSwitchingSession] = useState(false)
   const [lastError, setLastError] = useState("")
+  const [ttsVisualCompletedUntil, setTtsVisualCompletedUntil] = useState<number>(0)
   const [engineReadiness, setEngineReadiness] = useState<EngineReadiness>({
     checked: false,
     ok: false,
@@ -854,8 +941,20 @@ export function App() {
     : (mode === "minimal" ? "send_now" : queuePolicy)
 
   const sessionRef = useRef<WebVoiceSession | null>(null)
+  const agentRef = useRef<VoiceAgent | null>(null)
+  const sessionStoreUnsubscribeRef = useRef<(() => void) | null>(null)
+  const transcriptUnsubscribeRef = useRef<(() => void) | null>(null)
+  const pendingTurnUnsubscribeRef = useRef<(() => void) | null>(null)
+  const pendingTurnTracePhaseRef = useRef<PendingTurnPhase>("idle")
+  const sttProgressUnsubscribeRef = useRef<(() => void) | null>(null)
+  const sttFinalMetaUnsubscribeRef = useRef<(() => void) | null>(null)
+  const routeStateUnsubscribeRef = useRef<(() => void) | null>(null)
+  const agentSignalUnsubscribeRef = useRef<(() => void) | null>(null)
+  const agentRealtimeSignalUnsubscribeRef = useRef<(() => void) | null>(null)
+  const sessionStateUnsubscribeRef = useRef<(() => void) | null>(null)
+  const turnPhaseUnsubscribeRef = useRef<(() => void) | null>(null)
   const sdkPlayerRef = useRef<AudioOutputAdapter | null>(null)
-  const micRef = useRef<BrowserMicInput | null>(null)
+  const micRef = useRef<DemoMicInput | null>(null)
   const thinkingPlayerRef = useRef<ThinkingAudioPlayer | null>(null)
   const seenUserFinalRef = useRef<string>("")
   const activeAssistantTurnIdRef = useRef<string | null>(null)
@@ -869,13 +968,12 @@ export function App() {
   const speechWatchdogTimerRef = useRef<number | null>(null)
   const idleTransitionTimerRef = useRef<number | null>(null)
   const micHoldTimerRef = useRef<number | null>(null)
-  const pendingTurnStartedAtRef = useRef<number | null>(null)
-  const pendingTurnTimerRef = useRef<number | null>(null)
-  const pendingTurnClientIdRef = useRef<string | null>(null)
   const vadSpeechStartedAtRef = useRef(0)
   const lastAutoCommitAtRef = useRef(0)
   const micLifecycleTokenRef = useRef(0)
   const isDisconnectingRef = useRef(false)
+  const isConnectingRef = useRef(false)
+  const startupCommittedRef = useRef(false)
   const interruptionEpochRef = useRef(0)
   const generationWatchdogTimerRef = useRef<number | null>(null)
   const micHoldActiveRef = useRef(false)
@@ -896,13 +994,17 @@ export function App() {
   const requestedSessionLoadAttemptRef = useRef<string | null>(null)
   const turnPhaseLastSetAtRef = useRef(0)
   const turnPhaseStickyUntilRef = useRef(0)
-  const sttCurrentTurnIdRef = useRef<string | null>(null)
-  const sttCurrentGenerationIdRef = useRef<string | null>(null)
+  const sttTrackStateRef = useRef(new SttTrackStateManager())
   const localBargeInFramesRef = useRef(0)
   const localBargeInCooldownUntilRef = useRef(0)
   const localBargeInNoiseFloorRef = useRef(0)
   const allowAutoInterruptUntilRef = useRef(0)
-  const eventChainRef = useRef<Promise<void>>(Promise.resolve())
+  const lastSpokenErrorKeyRef = useRef("")
+  const lastSpokenErrorAtRef = useRef(0)
+  const suppressErrorSpeechUntilRef = useRef(0)
+  const ignoreAssistantUpdatesUntilRef = useRef(0)
+  const errorSpeechFallbackTimerRef = useRef<number | null>(null)
+  const interruptionPolicyRef = useRef(new InterruptionPolicy({ minWords: DEMO_INTERRUPT_MIN_WORDS, cooldownMs: 320 }))
   const eventBufferRef = useRef<string[]>([])
   const eventFlushTimerRef = useRef<number | null>(null)
   const sttUiTextRef = useRef("")
@@ -917,7 +1019,16 @@ export function App() {
   const micLevelUiPendingRef = useRef(0)
   const micLevelUiTimerRef = useRef<number | null>(null)
 
+  const clearSpeakingFlags = useCallback(() => {
+    ttsPlayingRef.current = false
+    setTtsPlaybackActive(false)
+    ttsStreamActiveRef.current = false
+    setTtsStreamActive(false)
+    setTtsVisualCompletedUntil(0)
+  }, [setTtsPlaybackActive, setTtsStreamActive])
+
   const canConnect = !sessionRef.current
+
   const micButtonVisualState: "off" | "on" | "hold" = isMicHoldActive
     ? "hold"
     : isListening
@@ -930,6 +1041,23 @@ export function App() {
     || ttsStreamActive
     || pendingSpeechAfterThinking
     || llmThinkingActive
+  const visualTurnPhase = useMemo<TurnPhase>(() => {
+    if (ttsPlaybackActive || ttsStreamActive) {
+      return "agent_speaking"
+    }
+    if (
+      llmResponseCompletedAt > 0
+      && Date.now() - llmResponseCompletedAt > 250
+      && !ttsPlaybackActive
+      && !ttsStreamActive
+    ) {
+      return sessionRef.current && micRef.current ? "listening" : "idle"
+    }
+    if (Date.now() <= ttsVisualCompletedUntil) {
+      return "agent_speaking"
+    }
+    return turnPhase
+  }, [llmResponseCompletedAt, turnPhase, ttsPlaybackActive, ttsStreamActive, ttsVisualCompletedUntil])
   const isMicDisconnectedView =
     Boolean(sessionRef.current)
     && !isListening
@@ -943,12 +1071,13 @@ export function App() {
       return sessionStatus
     }
     if (sessionStatus === "disconnected") return "disconnected"
-    if (turnPhase === "agent_speaking") return "speaking"
+    if (ttsPlaybackActive || ttsStreamActive) return "speaking"
+    if (visualTurnPhase === "agent_speaking") return "speaking"
     if (llmThinkingActive) return "thinking"
-    if (turnPhase === "processing") return "thinking"
-    if (turnPhase === "user_speaking") return "listening"
+    if (visualTurnPhase === "processing") return "thinking"
+    if (visualTurnPhase === "user_speaking") return "listening"
     return sessionStatus
-  }, [llmThinkingActive, sessionStatus, turnPhase])
+  }, [llmThinkingActive, sessionStatus, ttsPlaybackActive, ttsStreamActive, visualTurnPhase])
 
   const refreshSessionHistory = useCallback(async (opts?: { preserveError?: boolean }) => {
     const runtimeBaseUrl = baseUrl.trim()
@@ -1038,15 +1167,22 @@ export function App() {
       const client = new OpenVoiceWebClient({ baseUrl: runtimeBaseUrl })
       const turns = await client.http.listSessionTurns(targetSessionId, SESSION_TRANSCRIPT_LIMIT)
       const nextTranscript = transcriptFromHistoryTurns(turns)
-      if (opts?.setActiveTranscript && targetSessionId === sessionRef.current?.sessionId) {
-        setTranscript(nextTranscript)
+      
+      // Store the session reference to avoid race conditions
+      const currentSession = sessionRef.current
+      if (opts?.setActiveTranscript && currentSession && targetSessionId === currentSession.sessionId) {
+        currentSession.store.dispatch(toSetTranscriptAction(nextTranscript))
       }
       setSessionHistory((prev) => prev.map((item) => (
         item.sessionId === targetSessionId
           ? { ...item, transcript: nextTranscript }
           : item
       )))
-    } catch {
+    } catch (error) {
+      if (opts?.setActiveTranscript) {
+        const message = error instanceof Error ? error.message : String(error)
+        setHistoryError(`Could not load transcript for selected session: ${message}`)
+      }
       // Keep the current history list if transcript fetch fails.
     }
   }, [baseUrl, historyEndpointSupported])
@@ -1120,25 +1256,7 @@ export function App() {
     }
   }, [loadSessionTranscript])
 
-  const showInlineMinimalHistory = mode === "minimal" && minimalChatHistoryEnabled
-
-  const activeSessionHistoryCards = useMemo(() => {
-    if (!showInlineMinimalHistory) {
-      return [] as TranscriptItem[]
-    }
-    if (transcript.length > 0) {
-      return transcript.slice(-6)
-    }
-    if (!currentSessionHistory) {
-      return [] as TranscriptItem[]
-    }
-    return currentSessionHistory.transcript.slice(-6)
-  }, [currentSessionHistory, showInlineMinimalHistory, transcript])
-
   const openHistoryPanel = useCallback(() => {
-    if (!minimalChatHistoryEnabled) {
-      return
-    }
     if (!historyEndpointSupported) {
       setHistoryEndpointSupported(true)
     }
@@ -1146,7 +1264,7 @@ export function App() {
     setHistorySidebarOpen(true)
     setSessionHistory((prev) => (prev.length > 0 ? prev : readStoredSessionHistory()))
     void refreshSessionHistory({ preserveError: true })
-  }, [historyEndpointSupported, minimalChatHistoryEnabled, refreshSessionHistory])
+  }, [historyEndpointSupported, refreshSessionHistory])
 
   const closeHistoryPanel = useCallback(() => {
     setHistorySidebarOpen(false)
@@ -1194,6 +1312,19 @@ export function App() {
   useEffect(() => {
     turnPhaseRef.current = turnPhase
   }, [turnPhase])
+
+  useEffect(() => {
+    if (ttsVisualCompletedUntil <= Date.now()) {
+      return
+    }
+    const remainingMs = Math.max(0, ttsVisualCompletedUntil - Date.now())
+    const timer = window.setTimeout(() => {
+      setTtsVisualCompletedUntil(0)
+    }, remainingMs)
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [ttsVisualCompletedUntil])
 
   useEffect(() => {
     transcriptRef.current = transcript
@@ -1307,22 +1438,6 @@ export function App() {
       minimalDetailEnabled ? "1" : "0",
     )
   }, [minimalDetailEnabled])
-
-  useEffect(() => {
-    localStorage.setItem(
-      MINIMAL_CHAT_HISTORY_STORAGE_KEY,
-      minimalChatHistoryEnabled ? "1" : "0",
-    )
-  }, [minimalChatHistoryEnabled])
-
-  useEffect(() => {
-    if (mode !== "minimal") {
-      return
-    }
-    if (!minimalChatHistoryEnabled) {
-      setHistorySidebarOpen(false)
-    }
-  }, [minimalChatHistoryEnabled, mode])
 
   useEffect(() => {
     if (mode !== "minimal") {
@@ -1523,6 +1638,13 @@ export function App() {
     }
   }, [])
 
+  const clearErrorSpeechFallbackTimer = useCallback(() => {
+    if (errorSpeechFallbackTimerRef.current !== null) {
+      window.clearTimeout(errorSpeechFallbackTimerRef.current)
+      errorSpeechFallbackTimerRef.current = null
+    }
+  }, [])
+
   const flushMicLevelUi = useCallback(() => {
     clearMicLevelUiTimer()
     micLevelUiLastPaintAtRef.current = Date.now()
@@ -1578,119 +1700,6 @@ export function App() {
       idleTransitionTimerRef.current = null
     }
   }, [])
-
-  const clearPendingTurnTimer = useCallback(() => {
-    if (pendingTurnTimerRef.current !== null) {
-      window.clearInterval(pendingTurnTimerRef.current)
-      pendingTurnTimerRef.current = null
-    }
-  }, [])
-
-  const clearGenerationWatchdog = useCallback(() => {
-    if (generationWatchdogTimerRef.current !== null) {
-      window.clearTimeout(generationWatchdogTimerRef.current)
-      generationWatchdogTimerRef.current = null
-    }
-  }, [])
-
-  const clearPendingTurn = useCallback(() => {
-    pendingTurnStartedAtRef.current = null
-    pendingTurnClientIdRef.current = null
-    clearPendingTurnTimer()
-    setPendingTurnElapsedMs(0)
-    setPendingTurnPhase("idle")
-    sttCurrentTurnIdRef.current = null
-    sttCurrentGenerationIdRef.current = null
-  }, [clearPendingTurnTimer])
-
-  const startPendingTurn = useCallback((clientTurnId: string): boolean => {
-    const existingStartedAt = pendingTurnStartedAtRef.current
-    if (
-      existingStartedAt !== null
-      && Date.now() - existingStartedAt < DEMO_PENDING_TURN_TIMEOUT_MS
-    ) {
-      return false
-    }
-    pendingTurnClientIdRef.current = clientTurnId
-    pendingTurnStartedAtRef.current = Date.now()
-    setPendingTurnElapsedMs(0)
-    setPendingTurnPhase("commit_sent")
-    clearPendingTurnTimer()
-    pendingTurnTimerRef.current = window.setInterval(() => {
-      const startedAt = pendingTurnStartedAtRef.current
-      if (!startedAt) {
-        clearPendingTurnTimer()
-        return
-      }
-      const elapsedMs = Date.now() - startedAt
-      setPendingTurnElapsedMs(elapsedMs)
-      if (elapsedMs >= DEMO_PENDING_TURN_TIMEOUT_MS) {
-        setPendingTurnPhase("timeout")
-      } else if (elapsedMs >= DEMO_PENDING_TURN_DEGRADED_MS) {
-        setPendingTurnPhase("degraded")
-      } else if (elapsedMs >= DEMO_PENDING_TURN_SLOW_MS) {
-        setPendingTurnPhase("slow")
-      }
-    }, 300)
-    return true
-  }, [clearPendingTurnTimer])
-
-  const pushTraceLocal = useCallback((type: string, payload: unknown, kind = "ui.action") => {
-    traceReporterRef.current?.trackLocal(type, payload, kind)
-  }, [])
-
-  const markPendingTurnResolved = useCallback((via: string) => {
-    const startedAt = pendingTurnStartedAtRef.current
-    if (startedAt) {
-      pushTraceLocal(
-        "ui.pending_turn.resolved",
-        {
-          via,
-          elapsed_ms: Date.now() - startedAt,
-        },
-        "ui.state",
-      )
-    }
-    clearPendingTurn()
-  }, [clearPendingTurn, pushTraceLocal])
-
-  const markPendingTurnCancelled = useCallback((reason: string) => {
-    const startedAt = pendingTurnStartedAtRef.current
-    if (startedAt) {
-      pushTraceLocal(
-        "ui.pending_turn.cancelled",
-        {
-          reason,
-          elapsed_ms: Date.now() - startedAt,
-        },
-        "ui.state",
-      )
-    }
-    clearPendingTurn()
-  }, [clearPendingTurn, pushTraceLocal])
-
-  const pendingTurnMessage = useMemo(() => {
-    if (pendingTurnPhase === "idle") {
-      return ""
-    }
-    const elapsedSeconds = Math.max(1, Math.round(pendingTurnElapsedMs / 1000))
-    if (pendingTurnPhase === "commit_sent") {
-      return "Audio sent. Waiting for server confirmation..."
-    }
-    if (pendingTurnPhase === "awaiting_backend") {
-      return "Server confirmed. Waiting for transcript..."
-    }
-    if (pendingTurnPhase === "slow") {
-      return `Still waiting for transcript (${elapsedSeconds}s). Network or STT may be slow.`
-    }
-    if (pendingTurnPhase === "degraded") {
-      return `Delayed response (${elapsedSeconds}s). You can keep speaking; latest turn will be prioritized.`
-    }
-    return `Taking longer than usual (${elapsedSeconds}s). You can interrupt and retry.`
-  }, [pendingTurnElapsedMs, pendingTurnPhase])
-
-  const sttProgressMessage = ""
-  const sttFinalMetaMessage = ""
 
   const hasAssistantFlowActive = useCallback(() => {
     const withinThinkingHold = Date.now() < thinkingHoldUntilRef.current
@@ -1748,20 +1757,16 @@ export function App() {
     setTurnPhase(phase)
   }, [clearIdleTransitionTimer, scheduleIdleTransition])
 
-  const startSpeechWatchdog = useCallback(() => {
-    clearSpeechWatchdog()
-    speechWatchdogTimerRef.current = window.setTimeout(() => {
-      if (pendingSpeechAfterThinkingRef.current && !ttsPlayingRef.current) {
-        pendingSpeechAfterThinkingRef.current = false
-        setPendingSpeechAfterThinking(false)
-        if (sessionRef.current && micRef.current) {
-          setTurnPhaseStable("listening")
-        } else {
-          setTurnPhaseStable("idle")
-        }
-      }
-    }, 1200)
-  }, [clearSpeechWatchdog, setTurnPhaseStable])
+  const clearGenerationWatchdog = useCallback(() => {
+    if (generationWatchdogTimerRef.current !== null) {
+      window.clearTimeout(generationWatchdogTimerRef.current)
+      generationWatchdogTimerRef.current = null
+    }
+  }, [])
+
+  const pushTraceLocal = useCallback((type: string, payload: unknown, kind = "ui.action") => {
+    traceReporterRef.current?.trackLocal(type, payload, kind)
+  }, [])
 
   const rejectGeneration = useCallback((generationId: string | null) => {
     if (!generationId) return
@@ -1793,13 +1798,125 @@ export function App() {
     setTtsPlaybackActive(false)
     ttsStreamActiveRef.current = false
     setTtsStreamActive(false)
+    setTtsVisualCompletedUntil(0)
     pendingSpeechAfterThinkingRef.current = false
     setPendingSpeechAfterThinking(false)
     thinkingPlayerRef.current?.stop()
     void sdkPlayerRef.current?.flush().catch(() => undefined)
-    setLlmThinkingActive(false)
+    // now derived from SDK state
     setTurnPhaseStable(sessionRef.current && micRef.current ? "listening" : "idle")
-  }, [pushTraceLocal, rejectGeneration, setTurnPhaseStable])
+  }, [clearSpeakingFlags, pushTraceLocal, rejectGeneration, setTurnPhaseStable])
+
+  const announceLlmError = useCallback((message: string, code?: string | null) => {
+    const normalizedMessage = message.trim() || "unknown error"
+    const codePart = code ? ` (${code})` : ""
+    const normalizedJoined = `${code ?? ""} ${normalizedMessage}`.toLowerCase()
+    const isRateLimitLike = normalizedJoined.includes("rate limit")
+    ignoreAssistantUpdatesUntilRef.current = Date.now() + 1800
+
+    clearGenerationWatchdog()
+    clearSpeechWatchdog()
+    interruptionInFlightRef.current = false
+    suppressTtsUntilNextUserFinalRef.current = false
+    activeGenerationIdRef.current = null
+    pendingSpeechAfterThinkingRef.current = false
+    setPendingSpeechAfterThinking(false)
+    sttTrackStateRef.current.reset()
+
+    llmThinkingUiTextRef.current = ""
+    llmResponseTextRef.current = ""
+    clearLlmThinkingUiTimer()
+    clearLlmResponseUiTimer()
+    flushLlmThinkingUiText()
+    flushLlmResponseUiText()
+    setLlmThinkingActive(false)
+    setThinkingHoldUntil(0)
+
+    thinkingPlayerRef.current?.stop()
+    ttsPlayingRef.current = false
+    setTtsPlaybackActive(false)
+    ttsStreamActiveRef.current = false
+    setTtsStreamActive(false)
+    setTtsVisualCompletedUntil(0)
+    hardStopPlaybackNow()
+
+    setLastError(`llm error: ${normalizedMessage}${codePart}`)
+    setSessionStatus(sessionRef.current ? (micRef.current ? "listening" : "ready") : "disconnected")
+    setTurnPhaseStable(sessionRef.current && micRef.current ? "listening" : "idle")
+
+    const spokenMessage = buildSpokenLlmErrorMessage(normalizedMessage, code)
+    const dedupeKey = `${code ?? ""}:${spokenMessage}`.toLowerCase()
+    const now = Date.now()
+    const isTimeoutError = (code ?? "").toLowerCase() === "timeout"
+    const underGlobalCooldown = now < suppressErrorSpeechUntilRef.current
+    const shouldSpeak = !underGlobalCooldown && (isTimeoutError || dedupeKey !== lastSpokenErrorKeyRef.current || now - lastSpokenErrorAtRef.current > 5000)
+    if (shouldSpeak) {
+      lastSpokenErrorKeyRef.current = dedupeKey
+      lastSpokenErrorAtRef.current = now
+      if (isRateLimitLike) {
+        suppressErrorSpeechUntilRef.current = now + DEMO_ERROR_SPEECH_COOLDOWN_MS
+      }
+      const speakWithBrowserFallback = () => {
+        try {
+          if ("speechSynthesis" in window) {
+            window.speechSynthesis.cancel()
+            const utterance = new SpeechSynthesisUtterance(spokenMessage)
+            utterance.lang = "en-US"
+            utterance.rate = 1
+            utterance.pitch = 1
+            utterance.volume = 1
+            window.speechSynthesis.speak(utterance)
+          }
+        } catch {
+          // best-effort browser speech fallback
+        }
+      }
+      try {
+        agentRef.current?.say(spokenMessage, {
+          interruptCurrent: false,
+          reason: "llm_error",
+        })
+        clearErrorSpeechFallbackTimer()
+        errorSpeechFallbackTimerRef.current = window.setTimeout(() => {
+          errorSpeechFallbackTimerRef.current = null
+          if (!ttsPlayingRef.current && !ttsStreamActiveRef.current) {
+            speakWithBrowserFallback()
+          }
+        }, 900)
+      } catch {
+        speakWithBrowserFallback()
+      }
+    }
+  }, [
+    clearErrorSpeechFallbackTimer,
+    clearGenerationWatchdog,
+    clearLlmResponseUiTimer,
+    clearLlmThinkingUiTimer,
+    clearSpeechWatchdog,
+    flushLlmResponseUiText,
+    flushLlmThinkingUiText,
+    hardStopPlaybackNow,
+    setLlmThinkingActive,
+    setSessionStatus,
+    setTtsPlaybackActive,
+    setTtsStreamActive,
+    setTurnPhaseStable,
+  ])
+
+  const startSpeechWatchdog = useCallback(() => {
+    clearSpeechWatchdog()
+    speechWatchdogTimerRef.current = window.setTimeout(() => {
+      if (pendingSpeechAfterThinkingRef.current && !ttsPlayingRef.current) {
+        pendingSpeechAfterThinkingRef.current = false
+        setPendingSpeechAfterThinking(false)
+        if (sessionRef.current && micRef.current) {
+          setTurnPhaseStable("listening")
+        } else {
+          setTurnPhaseStable("idle")
+        }
+      }
+    }, 1200)
+  }, [clearSpeechWatchdog, setTurnPhaseStable])
 
   const startGenerationWatchdog = useCallback((generationId: string) => {
     clearGenerationWatchdog()
@@ -1807,26 +1924,491 @@ export function App() {
       if (activeGenerationIdRef.current !== generationId) {
         return
       }
+      if (ttsPlayingRef.current || ttsStreamActiveRef.current) {
+        return
+      }
       rejectGeneration(generationId)
-      interruptionInFlightRef.current = false
+      announceLlmError("The model timed out before finishing the response.", "timeout")
+    }, DEMO_GENERATION_WATCHDOG_TIMEOUT_MS)
+  }, [announceLlmError, clearGenerationWatchdog, rejectGeneration])
+
+  const handleAgentSignal = useCallback((signal: VoiceAgentSignal) => {
+    if (signal.type === "session.status") {
+      pushTraceLocal(
+        "ui.session.status",
+        {
+          status: signal.status,
+          reason: signal.reason,
+        },
+        "ui.state",
+      )
+      if (signal.generationId) {
+        activeGenerationIdRef.current = signal.generationId
+      }
+      if (signal.status === "transcribing" || signal.status === "thinking") {
+        setTurnPhaseStable("processing")
+      } else if (signal.status === "speaking") {
+        if (!suppressTtsUntilNextUserFinalRef.current) {
+          const hasAudiblePlayback = ttsPlayingRef.current || ttsStreamActiveRef.current
+          if (hasAudiblePlayback) {
+            setTurnPhaseStable("agent_speaking")
+            pendingSpeechAfterThinkingRef.current = false
+            setPendingSpeechAfterThinking(false)
+            clearSpeechWatchdog()
+          } else {
+            setTurnPhaseStable("processing")
+            pendingSpeechAfterThinkingRef.current = true
+            setPendingSpeechAfterThinking(true)
+            startSpeechWatchdog()
+          }
+        }
+      } else if (signal.status === "listening" || signal.status === "ready") {
+        const nextPhase = (() => {
+          if (
+            pendingSpeechAfterThinkingRef.current
+            || ttsPlayingRef.current
+            || ttsStreamActiveRef.current
+          ) {
+            return "agent_speaking" as TurnPhase
+          }
+          if (pendingTurnPhase !== "idle") {
+            return "processing" as TurnPhase
+          }
+          const recentUserSpeech =
+            Date.now() - lastUserSpeechAtRef.current <= DEMO_POST_RELEASE_PROCESSING_GRACE_MS
+          if (turnPhaseRef.current === "processing" && recentUserSpeech) {
+            return "processing" as TurnPhase
+          }
+          return (micRef.current ? "listening" : "idle") as TurnPhase
+        })()
+        setTurnPhaseStable(nextPhase)
+        if (
+          pendingTurnPhase === "idle"
+          && !ttsPlayingRef.current
+          && !ttsStreamActiveRef.current
+          && !llmThinkingActiveRef.current
+        ) {
+          clearGenerationWatchdog()
+          activeGenerationIdRef.current = null
+          sttTrackStateRef.current.reset()
+        }
+      } else if (
+        signal.status === "interrupted"
+        || signal.status === "closed"
+        || signal.status === "failed"
+      ) {
+        // now derived from SDK state
+        setTurnPhaseStable("idle")
+        pendingSpeechAfterThinkingRef.current = false
+        setPendingSpeechAfterThinking(false)
+        clearSpeechWatchdog()
+      }
+      return
+    }
+
+    if (signal.type === "assistant.phase") {
+      if (Date.now() < ignoreAssistantUpdatesUntilRef.current) {
+        return
+      }
+      resetAssistantPanels(signal.turnId)
+      if (!thinkingPlayerRef.current) {
+        thinkingPlayerRef.current = new ThinkingAudioPlayer(thinkingCueUrl)
+      }
+      if (signal.generationId) {
+        activeGenerationIdRef.current = signal.generationId
+        suppressTtsUntilNextUserFinalRef.current = false
+        startGenerationWatchdog(signal.generationId)
+      }
+
+      if (signal.phase === "thinking") {
+        // now derived from SDK state
+        setThinkingHoldUntil(Date.now() + 1200)
+        setTurnPhaseStable("processing")
+        pendingSpeechAfterThinkingRef.current = false
+        setPendingSpeechAfterThinking(false)
+        clearSpeechWatchdog()
+        void thinkingPlayerRef.current.start()
+      } else if (signal.phase === "generating") {
+        // now derived from SDK state
+        pendingSpeechAfterThinkingRef.current = true
+        setPendingSpeechAfterThinking(true)
+        if (ttsPlayingRef.current || ttsStreamActiveRef.current) {
+          setTurnPhaseStable("agent_speaking")
+        } else {
+          setTurnPhaseStable("processing")
+        }
+        startSpeechWatchdog()
+        thinkingPlayerRef.current.stop()
+      } else {
+        clearGenerationWatchdog()
+        // now derived from SDK state
+        thinkingPlayerRef.current.stop()
+      }
+      return
+    }
+
+    if (signal.type === "stt.final") {
       suppressTtsUntilNextUserFinalRef.current = false
-      setLlmThinkingActive(false)
+      resetAssistantPanels(signal.turnId)
+      interruptionInFlightRef.current = false
+      if (signal.text.trim()) {
+        lastUserSpeechAtRef.current = Date.now()
+        allowAutoInterruptUntilRef.current = 0
+      }
+      queueSttUiText(signal.text || "", true)
+      setTurnPhaseStable("processing")
+      const dedupeKey = `${signal.turnId ?? "-"}:${signal.text}`
+      const isCommittedUserFinal =
+        typeof signal.generationId === "string" && signal.generationId.length > 0
+      if (isCommittedUserFinal && dedupeKey !== seenUserFinalRef.current && signal.text.trim()) {
+        seenUserFinalRef.current = dedupeKey
+      }
+      return
+    }
+    if (signal.type === "vad.state") {
+      const shouldAutoBargeInterrupt = effectiveQueuePolicy === "send_now"
+      if (signal.kind === "start_of_speech") {
+        vadSpeechStartedAtRef.current = Date.now()
+      }
+      const canRenderUserSpeech = micRef.current && (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready")
+      const confidentInferenceSpeech = signal.kind === "inference" && signal.speaking === true && typeof signal.probability === "number" && signal.probability >= DEMO_UI_VAD_PROBABILITY_THRESHOLD
+      const speechStartDetected = signal.kind === "start_of_speech" || confidentInferenceSpeech
+      if (speechStartDetected) {
+        allowAutoInterruptUntilRef.current = Date.now() + 700
+        if (shouldAutoBargeInterrupt && DEMO_ENABLE_VAD_AUTO_INTERRUPT && DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT && interruptionPolicyRef.current.shouldInterruptFromVad({ type: "vad.state", kind: signal.kind, speaking: signal.speaking ?? false, probability: signal.probability ?? undefined })) {
+          triggerImmediateInterrupt("vad")
+        }
+        const agentCurrentlySpeaking = turnPhaseRef.current === "agent_speaking" || sessionStatusRef.current === "speaking" || ttsPlayingRef.current || ttsStreamActiveRef.current
+        if (!agentCurrentlySpeaking && canRenderUserSpeech) {
+          lastUserSpeechAtRef.current = Date.now()
+          setTurnPhaseStable("user_speaking")
+        }
+      } else if (signal.kind === "end_of_speech" && signal.speaking === false) {
+        const hadRecentUserSpeech = Date.now() - lastUserSpeechAtRef.current <= DEMO_MIC_STOP_COMMIT_GRACE_MS
+        const speakingWindowMs = Date.now() - vadSpeechStartedAtRef.current
+        const isVoiceLikeSegment = speakingWindowMs >= DEMO_MIN_SPEECH_DURATION_MS
+        const autoCommitCooldownSatisfied = Date.now() - lastAutoCommitAtRef.current >= DEMO_AUTO_COMMIT_MIN_INTERVAL_MS
+        const canStartPendingTurn = pendingTurnPhase === "idle"
+        if (sessionRef.current && micRef.current && (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready") && hadRecentUserSpeech && isVoiceLikeSegment && autoCommitCooldownSatisfied && canStartPendingTurn && !DEMO_SEND_NOW_RUNTIME_OWNED_COMMIT) {
+          const clientTurnId = `ct_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+          lastAutoCommitAtRef.current = Date.now()
+          agentRef.current?.commit(undefined, clientTurnId)
+        }
+      } else if (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready") {
+        const nextPhase = (() => {
+          const prev = turnPhaseRef.current
+          if (prev === "agent_speaking") return prev
+          if (prev === "processing" && Date.now() < thinkingHoldUntilRef.current) return prev
+          return (micRef.current ? "listening" : "idle") as TurnPhase
+        })()
+        setTurnPhaseStable(nextPhase)
+      }
+      return
+    }
+    if (signal.type === "stt.partial") {
+      const partialTurnId = signal.turnId
+      const partialGenerationId = signal.generationId
+      const sendNowRelaxedRotation = effectiveQueuePolicy === "send_now"
+      const canRotateSttTrack = pendingTurnPhase === "idle" && (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready") && !ttsPlayingRef.current && !ttsStreamActiveRef.current && !llmThinkingActiveRef.current
+      const trackAccepted = sttTrackStateRef.current.checkAndUpdate(partialTurnId, partialGenerationId, { canRotate: canRotateSttTrack, relaxedRotation: sendNowRelaxedRotation })
+      if (!trackAccepted) {
+        return
+      }
+      const partialText = signal.text || ""
+      queueSttUiText(partialText)
+      const hasPartialText = partialText.trim().length > 0
+      if (hasPartialText) {
+        lastUserSpeechAtRef.current = Date.now()
+        if (!vadSpeechStartedAtRef.current) {
+          vadSpeechStartedAtRef.current = Date.now()
+        }
+      }
+      const canRenderUserSpeech = micRef.current && (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready")
+      const agentCurrentlySpeaking = turnPhaseRef.current === "agent_speaking" || sessionStatusRef.current === "speaking" || ttsPlayingRef.current || ttsStreamActiveRef.current
+      if (agentCurrentlySpeaking && isLikelyAssistantEcho(partialText, llmResponseTextRef.current)) {
+        return
+      }
+      const shouldAutoBargeInterrupt = effectiveQueuePolicy === "send_now"
+      if (shouldAutoBargeInterrupt && DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT && (ttsPlayingRef.current || ttsStreamActiveRef.current) && !interruptionInFlightRef.current && interruptionPolicyRef.current.shouldInterruptFromPartial(partialText)) {
+        pushTraceLocal("ui.auto_interrupt.stt_partial_candidate", { session_id: sessionRef.current?.sessionId ?? null, text: partialText }, "ui.action")
+        triggerImmediateInterrupt("stt_partial")
+      }
+      if (hasPartialText && canRenderUserSpeech) {
+        setTurnPhaseStable("user_speaking")
+      }
+      return
+    }
+    if (signal.type === "assistant.thinking") {
+      if (Date.now() < ignoreAssistantUpdatesUntilRef.current) {
+        return
+      }
+      // now derived from SDK state
+      llmThinkingUiTextRef.current += signal.delta || ""
+      if (mode !== "minimal") {
+        queueLlmThinkingUiText()
+      }
+      if (!ttsPlayingRef.current && !ttsStreamActiveRef.current) {
+        setTurnPhaseStable("processing")
+      }
+      return
+    }
+    if (signal.type === "assistant.response.delta") {
+      if (Date.now() < ignoreAssistantUpdatesUntilRef.current) {
+        return
+      }
+      // now derived from SDK state
+      const cleanDelta = (signal.delta || "")
+        .replace(/\*\*/g, "")
+        .replace(/\*/g, "")
+        .replace(/__/g, "")
+        .replace(/`/g, "")
+      llmResponseTextRef.current += cleanDelta
+      if (mode !== "minimal") {
+        queueLlmResponseUiText()
+      }
+      if (ttsPlayingRef.current || ttsStreamActiveRef.current) {
+        setTurnPhaseStable("agent_speaking")
+      } else {
+        setTurnPhaseStable("processing")
+      }
+      return
+    }
+    if (signal.type === "assistant.response.final") {
+      if (Date.now() < ignoreAssistantUpdatesUntilRef.current) {
+        return
+      }
+      clearGenerationWatchdog()
+      setLlmResponseCompletedAt(Date.now())
+      window.setTimeout(() => {
+        if (!ttsPlayingRef.current && !ttsStreamActiveRef.current) {
+          clearSpeakingFlags()
+        }
+      }, 350)
+      suppressErrorSpeechUntilRef.current = 0
+      if (signal.text.trim()) {
+        llmResponseTextRef.current = signal.text
+        if (mode !== "minimal") {
+          queueLlmResponseUiText(true)
+        }
+      }
+      return
+    }
+    if (signal.type === "assistant.error") {
+      if (signal.generationId && rejectedGenerationIdsRef.current.has(signal.generationId)) {
+        return
+      }
+      if (signal.generationId) {
+        activeGenerationIdRef.current = signal.generationId
+        startGenerationWatchdog(signal.generationId)
+      }
+      announceLlmError(signal.message, signal.code)
+      return
+    }
+    if (signal.type === "assistant.speaking.state") {
+      if (signal.state === "playing") {
+        thinkingPlayerRef.current?.stop()
+        clearGenerationWatchdog()
+        ttsStreamActiveRef.current = true
+        setTtsStreamActive(true)
+        setTtsVisualCompletedUntil(0)
+        // now derived from SDK state
+        pendingSpeechAfterThinkingRef.current = false
+        setPendingSpeechAfterThinking(false)
+        clearSpeechWatchdog()
+        setTurnPhaseStable("agent_speaking")
+      } else if (signal.state === "complete") {
+        ttsStreamActiveRef.current = false
+        setTtsStreamActive(false)
+        setTtsVisualCompletedUntil(Date.now() + 700)
+        pendingSpeechAfterThinkingRef.current = false
+        setPendingSpeechAfterThinking(false)
+        clearSpeechWatchdog()
+      }
+      return
+    }
+    if (signal.type === "interrupt.lifecycle" && signal.stage === "acknowledged") {
+      suppressTtsUntilNextUserFinalRef.current = true
+      rejectGeneration(activeGenerationIdRef.current)
+      // now derived from SDK state
       ttsPlayingRef.current = false
       setTtsPlaybackActive(false)
       ttsStreamActiveRef.current = false
       setTtsStreamActive(false)
+      setTtsVisualCompletedUntil(0)
       pendingSpeechAfterThinkingRef.current = false
       setPendingSpeechAfterThinking(false)
-      void hardStopPlayback()
+      clearSpeechWatchdog()
+      sttTrackStateRef.current.reset()
       setTurnPhaseStable(sessionRef.current && micRef.current ? "listening" : "idle")
-      setLastError("Generation timed out. Recovered to listening.")
+      void hardStopPlayback()
+      interruptionInFlightRef.current = false
+      return
+    }
+    if (signal.type === "sdk.error") {
+      const timeoutKind = typeof signal.details?.timeout_kind === "string" ? signal.details.timeout_kind : null
+      if (timeoutKind === "stt_final_timeout") {
+        return
+      }
+      const codePart = signal.code ? ` (${signal.code})` : ""
+      setLastError(`${signal.message}${codePart}`)
+      clearGenerationWatchdog()
+      interruptionInFlightRef.current = false
+      suppressTtsUntilNextUserFinalRef.current = false
       activeGenerationIdRef.current = null
-    }, DEMO_GENERATION_WATCHDOG_TIMEOUT_MS)
-  }, [clearGenerationWatchdog, hardStopPlayback, rejectGeneration, setTurnPhaseStable])
+      ttsPlayingRef.current = false
+      setTtsPlaybackActive(false)
+      ttsStreamActiveRef.current = false
+      setTtsStreamActive(false)
+      setTtsVisualCompletedUntil(0)
+      // now derived from SDK state
+      setSessionStatus(`error: ${signal.message}`)
+      setTurnPhaseStable(sessionRef.current && micRef.current ? "listening" : "idle")
+      const codeLower = (signal.code ?? "").toLowerCase()
+      const msgLower = signal.message.toLowerCase()
+      if (codeLower.includes("provider") || msgLower.includes("rate limit")) {
+        announceLlmError(signal.message, signal.code)
+      }
+    }
+  }, [
+    announceLlmError,
+    clearSpeakingFlags,
+    clearGenerationWatchdog,
+    clearSpeechWatchdog,
+    hardStopPlayback,
+    mode,
+    pendingTurnPhase,
+    queueLlmResponseUiText,
+    queueLlmThinkingUiText,
+    queueSttUiText,
+    resetAssistantPanels,
+    hardStopPlayback,
+    startGenerationWatchdog,
+    startSpeechWatchdog,
+    setTurnPhaseStable,
+    pushTraceLocal,
+    setTtsVisualCompletedUntil,
+    setLlmResponseCompletedAt,
+  ])
+
+  const pendingTurnTraceElapsedRef = useRef(0)
+
+  useEffect(() => {
+    if (pendingTurnPhase === "idle") {
+      pendingTurnTracePhaseRef.current = "idle"
+      pendingTurnTraceElapsedRef.current = 0
+      return
+    }
+
+    if (pendingTurnTracePhaseRef.current === "idle") {
+      pushTraceLocal(
+        "ui.pending_turn.start",
+        {
+          phase: pendingTurnPhase,
+        },
+        "ui.state",
+      )
+      pendingTurnTracePhaseRef.current = pendingTurnPhase
+      pendingTurnTraceElapsedRef.current = pendingTurnElapsedMs
+      return
+    }
+
+    if (pendingTurnPhase !== pendingTurnTracePhaseRef.current) {
+      pushTraceLocal(
+        "ui.pending_turn.phase",
+        {
+          from: pendingTurnTracePhaseRef.current,
+          to: pendingTurnPhase,
+          elapsed_ms: pendingTurnElapsedMs,
+        },
+        "ui.state",
+      )
+      pendingTurnTracePhaseRef.current = pendingTurnPhase
+      pendingTurnTraceElapsedRef.current = pendingTurnElapsedMs
+      return
+    }
+
+    if (pendingTurnElapsedMs - pendingTurnTraceElapsedRef.current >= 1000) {
+      pendingTurnTraceElapsedRef.current = pendingTurnElapsedMs
+      pushTraceLocal(
+        "ui.pending_turn.elapsed",
+        {
+          phase: pendingTurnPhase,
+          elapsed_ms: pendingTurnElapsedMs,
+        },
+        "ui.state",
+      )
+    }
+  }, [pendingTurnElapsedMs, pendingTurnPhase, pushTraceLocal])
+
+  const pendingTurnMessage = useMemo(() => {
+    if (pendingTurnPhase === "idle") {
+      return ""
+    }
+    const elapsedSeconds = Math.max(1, Math.round(pendingTurnElapsedMs / 1000))
+    if (pendingTurnPhase === "commit_sent") {
+      return "Audio sent. Waiting for server confirmation..."
+    }
+    if (pendingTurnPhase === "awaiting_backend") {
+      return "Server confirmed. Waiting for transcript..."
+    }
+    if (pendingTurnPhase === "slow") {
+      return `Still waiting for transcript (${elapsedSeconds}s). Network or STT may be slow.`
+    }
+    if (pendingTurnPhase === "degraded") {
+      return `Delayed response (${elapsedSeconds}s). You can keep speaking; latest turn will be prioritized.`
+    }
+    return `Taking longer than usual (${elapsedSeconds}s). You can interrupt and retry.`
+  }, [pendingTurnElapsedMs, pendingTurnPhase])
+
+  const sttProgressMessage = useMemo(() => {
+    const status = sttProgress.status
+    if (!status) {
+      return ""
+    }
+    const waitedMs = sttProgress.waitedMs
+    const attempt = sttProgress.attempt
+    const waited = typeof waitedMs === "number" ? ` (${Math.max(0, waitedMs)}ms)` : ""
+    const attemptText = typeof attempt === "number" ? `, attempt ${attempt}` : ""
+
+    if (status === "queued") {
+      return `STT queued${waited}${attemptText}`
+    }
+    if (status === "transcribing") {
+      return `STT transcribing${waited}${attemptText}`
+    }
+    if (status === "waiting_final") {
+      return `Waiting for STT final${waited}${attemptText}`
+    }
+    if (status === "stabilizing") {
+      return `Stabilizing transcript${waited}${attemptText}`
+    }
+    if (status === "retry_scheduled") {
+      return `Retry scheduled${waited}${attemptText}`
+    }
+    return `STT status: ${status}${waited}${attemptText}`
+  }, [sttProgress.attempt, sttProgress.status, sttProgress.waitedMs])
+
+  const sttFinalMetaMessage = useMemo(() => {
+    const details: string[] = []
+    if (typeof sttFinalMeta.revision === "number") {
+      details.push(`rev ${sttFinalMeta.revision}`)
+    }
+    if (sttFinalMeta.finality) {
+      details.push(sttFinalMeta.finality)
+    }
+    if (typeof sttFinalMeta.deferred === "boolean") {
+      details.push(sttFinalMeta.deferred ? "deferred" : "immediate")
+    }
+    if (details.length === 0) {
+      return ""
+    }
+    return `STT final: ${details.join(", ")}`
+  }, [sttFinalMeta.deferred, sttFinalMeta.finality, sttFinalMeta.revision])
 
   const triggerImmediateInterrupt = useCallback((source: "vad" | "stt_partial" | "local_audio") => {
     const session = sessionRef.current
     if (!session) return
+    const now = Date.now()
 
     const agentCurrentlySpeaking =
       turnPhaseRef.current === "agent_speaking"
@@ -1840,11 +2422,16 @@ export function App() {
       return
     }
 
+    if (!interruptionPolicyRef.current.canInterrupt(now)) {
+      return
+    }
+
     localBargeInFramesRef.current = 0
-    localBargeInCooldownUntilRef.current = Date.now() + DEMO_LOCAL_BARGE_IN_COOLDOWN_MS
+    localBargeInCooldownUntilRef.current = now + DEMO_LOCAL_BARGE_IN_COOLDOWN_MS
     allowAutoInterruptUntilRef.current = 0
     interruptionInFlightRef.current = true
     suppressTtsUntilNextUserFinalRef.current = true
+    interruptionPolicyRef.current.markInterrupted(now)
     rejectGeneration(activeGenerationIdRef.current)
     const interruptEventName =
       source === "vad"
@@ -1861,12 +2448,12 @@ export function App() {
       "ui.action",
     )
     hardStopPlaybackNow()
-    session.interrupt("barge_in")
+    void session.interrupt("barge_in")
   }, [hardStopPlaybackNow, pushTraceLocal, rejectGeneration])
 
   const activeGridBands = useMemo(() => {
-    return turnPhase === "agent_speaking" ? ttsBands : micBands
-  }, [micBands, ttsBands, turnPhase])
+    return visualTurnPhase === "agent_speaking" ? ttsBands : micBands
+  }, [micBands, ttsBands, visualTurnPhase])
 
   const runtimeConfig = useMemo<RuntimeSessionConfig>(() => {
     const effectivePolicy = effectiveQueuePolicy
@@ -1885,6 +2472,21 @@ export function App() {
         minDuration: DEMO_INTERRUPT_MIN_DURATION_SECONDS,
         minWords: DEMO_INTERRUPT_MIN_WORDS,
         cooldownMs: DEMO_INTERRUPT_COOLDOWN_MS,
+        autoInterrupt: {
+          enabled: DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT,
+          vadThreshold: DEMO_UI_VAD_PROBABILITY_THRESHOLD,
+          minDurationMs: DEMO_MIN_SPEECH_DURATION_MS,
+        },
+      },
+      client: {
+        echoFiltering: {
+          enabled: true,
+        },
+        autoCommit: {
+          enabled: DEMO_SEND_NOW_RUNTIME_OWNED_COMMIT,
+          vadEndOfSpeechDelayMs: DEMO_MIC_STOP_COMMIT_GRACE_MS,
+          minSpeechDurationMs: DEMO_MIN_SPEECH_DURATION_MS,
+        },
       },
       llm: {
         systemPrompt: OPEN_VOICE_SYSTEM_PROMPT,
@@ -1922,15 +2524,29 @@ export function App() {
     queueEventLine(rendered)
   }, [mode, queueEventLine])
 
-  const handleEvent = useCallback(async (event: ConversationEvent) => {
-    const shouldAutoBargeInterrupt = effectiveQueuePolicy === "send_now"
+  const handleRawEvent = useCallback((event: ConversationEvent) => {
+    if (event.type === "tts.chunk") {
+      const chunk = event.chunk as { data_base64?: unknown; sequence?: unknown }
+      console.log("[TTS] chunk received, sequence:", chunk.sequence, "data length:", typeof chunk.data_base64 === "string" ? chunk.data_base64.length : "unknown")
+    }
+    if (event.type === "tts.completed") {
+      console.log("[TTS] completed, duration_ms:", (event as { duration_ms?: number }).duration_ms)
+    }
+    if (event.type === "llm.error") {
+      console.log("[LLM] error event:", event)
+      const code = event.error?.code ?? null
+      const message = event.error?.message ?? "unknown error"
+      announceLlmError(message, code)
+    }
+    if (event.type === "llm.completed") {
+      console.log("[LLM] completed")
+    }
+
     appendEvent(event)
-    const eventGenerationId = typeof event.generation_id === "string" ? event.generation_id : null
 
     if (event.type === "session.ready") {
-      markPendingTurnResolved("session.ready")
       setSessionStatus("ready")
-      setLlmThinkingActive(false)
+      // now derived from SDK state
       setTurnPhaseStable(micRef.current ? "listening" : "idle")
       pendingSpeechAfterThinkingRef.current = false
       setPendingSpeechAfterThinking(false)
@@ -1939,665 +2555,14 @@ export function App() {
     }
 
     if (event.type === "turn.accepted") {
-      if (!pendingTurnClientIdRef.current || pendingTurnClientIdRef.current !== event.client_turn_id) {
-        return
-      }
-      setPendingTurnPhase("awaiting_backend")
       return
     }
-
-    if (event.type === "stt.status") {
-      return
-    }
-
-    if (event.type === "session.status") {
-      if (eventGenerationId && rejectedGenerationIdsRef.current.has(eventGenerationId)) {
-        return
-      }
-      pushTraceLocal(
-        "ui.session.status",
-        {
-          status: event.status,
-          reason: event.reason ?? null,
-        },
-        "ui.state",
-      )
-      setSessionStatus(event.status)
-      setLlmThinkingActive(event.status === "thinking" || event.status === "transcribing")
-      if (event.status === "transcribing") {
-        if (pendingTurnStartedAtRef.current) {
-          markPendingTurnResolved("session.status.transcribing")
-        }
-        if (eventGenerationId) {
-          activeGenerationIdRef.current = eventGenerationId
-        }
-        setTurnPhaseStable("processing")
-      }
-      else if (event.status === "thinking") {
-        if (pendingTurnStartedAtRef.current) {
-          markPendingTurnResolved("session.status.thinking")
-        }
-        if (eventGenerationId) {
-          activeGenerationIdRef.current = eventGenerationId
-        }
-        setTurnPhaseStable("processing")
-      }
-      else if (event.status === "speaking") {
-        if (pendingTurnStartedAtRef.current) {
-          markPendingTurnResolved("session.status.speaking")
-        }
-        if (suppressTtsUntilNextUserFinalRef.current) {
-          return
-        }
-        if (eventGenerationId) {
-          activeGenerationIdRef.current = eventGenerationId
-        }
-        const hasAudiblePlayback = ttsPlayingRef.current || ttsStreamActiveRef.current
-        if (hasAudiblePlayback) {
-          setTurnPhaseStable("agent_speaking")
-          pendingSpeechAfterThinkingRef.current = false
-          setPendingSpeechAfterThinking(false)
-          clearSpeechWatchdog()
-        } else {
-          setTurnPhaseStable("processing")
-          pendingSpeechAfterThinkingRef.current = true
-          setPendingSpeechAfterThinking(true)
-          startSpeechWatchdog()
-        }
-      }
-      else if (event.status === "listening" || event.status === "ready") {
-        const nextPhase = (() => {
-          if (
-            pendingSpeechAfterThinkingRef.current
-            || ttsPlayingRef.current
-            || ttsStreamActiveRef.current
-          ) {
-            return "agent_speaking" as TurnPhase
-          }
-          if (pendingTurnStartedAtRef.current) {
-            return "processing" as TurnPhase
-          }
-          const recentUserSpeech =
-            Date.now() - lastUserSpeechAtRef.current <= DEMO_POST_RELEASE_PROCESSING_GRACE_MS
-          if (turnPhaseRef.current === "processing" && recentUserSpeech) {
-            return "processing" as TurnPhase
-          }
-          return (micRef.current ? "listening" : "idle") as TurnPhase
-        })()
-        setTurnPhaseStable(nextPhase)
-        if (
-          !pendingTurnStartedAtRef.current
-          && !ttsPlayingRef.current
-          && !ttsStreamActiveRef.current
-          && !llmThinkingActiveRef.current
-        ) {
-          clearGenerationWatchdog()
-          activeGenerationIdRef.current = null
-          sttCurrentTurnIdRef.current = null
-          sttCurrentGenerationIdRef.current = null
-        }
-      } else if (
-        event.status === "interrupted" ||
-        event.status === "closed" ||
-        event.status === "failed"
-      ) {
-        setLlmThinkingActive(false)
-        setTurnPhaseStable("idle")
-        pendingSpeechAfterThinkingRef.current = false
-        setPendingSpeechAfterThinking(false)
-        clearSpeechWatchdog()
-      }
-
-      return
-    }
-
-    if (event.type === "vad.state") {
-      if (event.kind === "start_of_speech") {
-        vadSpeechStartedAtRef.current = Date.now()
-      }
-
-      const canRenderUserSpeech =
-        micRef.current
-        && (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready")
-      const confidentInferenceSpeech =
-        event.kind === "inference"
-        && event.speaking === true
-        && typeof event.probability === "number"
-        && event.probability >= DEMO_UI_VAD_PROBABILITY_THRESHOLD
-      const speechStartDetected = event.kind === "start_of_speech" || confidentInferenceSpeech
-
-      if (speechStartDetected) {
-        allowAutoInterruptUntilRef.current = Date.now() + 700
-        if (
-          shouldAutoBargeInterrupt
-          && DEMO_ENABLE_VAD_AUTO_INTERRUPT
-          && DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT
-          && isInterruptWorthyVad(event)
-        ) {
-          triggerImmediateInterrupt("vad")
-        }
-        if (pendingTurnStartedAtRef.current) {
-          markPendingTurnResolved("vad.speech_start")
-        }
-        const agentCurrentlySpeaking =
-          turnPhaseRef.current === "agent_speaking"
-          || sessionStatusRef.current === "speaking"
-          || ttsPlayingRef.current
-          || ttsStreamActiveRef.current
-        if (!agentCurrentlySpeaking && canRenderUserSpeech) {
-          lastUserSpeechAtRef.current = Date.now()
-          setTurnPhaseStable("user_speaking")
-        }
-      } else if (event.kind === "end_of_speech" && event.speaking === false) {
-        const hadRecentUserSpeech =
-          Date.now() - lastUserSpeechAtRef.current <= DEMO_MIC_STOP_COMMIT_GRACE_MS
-        const speakingWindowMs = Date.now() - vadSpeechStartedAtRef.current
-        const isVoiceLikeSegment = speakingWindowMs >= DEMO_MIN_SPEECH_DURATION_MS
-        const autoCommitCooldownSatisfied =
-          Date.now() - lastAutoCommitAtRef.current >= DEMO_AUTO_COMMIT_MIN_INTERVAL_MS
-        const canStartPendingTurn = !pendingTurnStartedAtRef.current
-        if (
-          sessionRef.current
-          && micRef.current
-          && (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready")
-          && hadRecentUserSpeech
-          && isVoiceLikeSegment
-          && autoCommitCooldownSatisfied
-          && canStartPendingTurn
-          && !DEMO_SEND_NOW_RUNTIME_OWNED_COMMIT
-        ) {
-          const clientTurnId = `ct_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
-          const started = startPendingTurn(clientTurnId)
-          if (started) {
-            lastAutoCommitAtRef.current = Date.now()
-            sessionRef.current.commit(undefined, clientTurnId)
-          }
-        }
-      } else if (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready") {
-        const nextPhase = (() => {
-          const prev = turnPhaseRef.current
-          if (prev === "agent_speaking") return prev
-          if (prev === "processing" && Date.now() < thinkingHoldUntilRef.current) return prev
-          return (micRef.current ? "listening" : "idle") as TurnPhase
-        })()
-        setTurnPhaseStable(nextPhase)
-      }
-      return
-    }
-
-    if (event.type === "stt.partial") {
-      const partialTurnId = event.turn_id ?? null
-      const partialGenerationId = typeof event.generation_id === "string" ? event.generation_id : null
-      const sendNowRelaxedRotation = effectiveQueuePolicy === "send_now"
-      const canRotateSttTrack =
-        !pendingTurnStartedAtRef.current
-        && (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready")
-        && !ttsPlayingRef.current
-        && !ttsStreamActiveRef.current
-        && !llmThinkingActiveRef.current
-
-      // Do not drop user STT updates by rejected generation id.
-      // During send_now cutover, backend may still attach the previous
-      // generation id briefly while the new user turn is forming.
-      if (
-        sttCurrentTurnIdRef.current
-        && partialTurnId
-        && partialTurnId !== sttCurrentTurnIdRef.current
-      ) {
-        if (!canRotateSttTrack && !sendNowRelaxedRotation) {
-          return
-        }
-        sttCurrentTurnIdRef.current = null
-        sttCurrentGenerationIdRef.current = null
-      }
-      if (
-        sttCurrentGenerationIdRef.current
-        && partialGenerationId
-        && partialGenerationId !== sttCurrentGenerationIdRef.current
-      ) {
-        if (!canRotateSttTrack && !sendNowRelaxedRotation) {
-          return
-        }
-        sttCurrentTurnIdRef.current = null
-        sttCurrentGenerationIdRef.current = null
-      }
-      if (!sttCurrentTurnIdRef.current && partialTurnId) {
-        sttCurrentTurnIdRef.current = partialTurnId
-      }
-      if (!sttCurrentGenerationIdRef.current && partialGenerationId) {
-        sttCurrentGenerationIdRef.current = partialGenerationId
-      }
-
-      if (pendingTurnStartedAtRef.current) {
-        markPendingTurnResolved("stt.partial")
-      }
-      const partialText = event.text || ""
-      queueSttUiText(partialText)
-      const hasPartialText = partialText.trim().length > 0
-      if (hasPartialText) {
-        lastUserSpeechAtRef.current = Date.now()
-        if (!vadSpeechStartedAtRef.current) {
-          vadSpeechStartedAtRef.current = Date.now()
-        }
-      }
-      const canRenderUserSpeech =
-        micRef.current
-        && (
-        sessionStatusRef.current === "listening"
-        || sessionStatusRef.current === "ready"
-        )
-      const agentCurrentlySpeaking =
-        turnPhaseRef.current === "agent_speaking"
-        || sessionStatusRef.current === "speaking"
-        || ttsPlayingRef.current
-        || ttsStreamActiveRef.current
-
-      if (agentCurrentlySpeaking && isLikelyAssistantEcho(partialText, llmResponseTextRef.current)) {
-        return
-      }
-
-      if (
-        shouldAutoBargeInterrupt
-        && DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT
-        && (ttsPlayingRef.current || ttsStreamActiveRef.current)
-        && !interruptionInFlightRef.current
-        && isInterruptWorthyPartial(partialText)
-      ) {
-        pushTraceLocal(
-          "ui.auto_interrupt.stt_partial_candidate",
-          {
-            session_id: sessionRef.current?.sessionId ?? null,
-            text: partialText,
-          },
-          "ui.action",
-        )
-        triggerImmediateInterrupt("stt_partial")
-      }
-      if (hasPartialText && canRenderUserSpeech) {
-        setTurnPhaseStable("user_speaking")
-      }
-      return
-    }
-
-    if (event.type === "stt.final") {
-      if (pendingTurnStartedAtRef.current) {
-        markPendingTurnResolved("stt.final")
-      }
-      const incomingGenerationId = typeof event.generation_id === "string" ? event.generation_id : null
-      const incomingTurnId = event.turn_id ?? null
-      const sendNowRelaxedRotation = effectiveQueuePolicy === "send_now"
-      const canRotateSttTrack =
-        !pendingTurnStartedAtRef.current
-        && (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready")
-        && !ttsPlayingRef.current
-        && !ttsStreamActiveRef.current
-        && !llmThinkingActiveRef.current
-
-      if (
-        sttCurrentTurnIdRef.current
-        && incomingTurnId
-        && incomingTurnId !== sttCurrentTurnIdRef.current
-      ) {
-        if (!canRotateSttTrack && !sendNowRelaxedRotation) {
-          return
-        }
-        sttCurrentTurnIdRef.current = null
-        sttCurrentGenerationIdRef.current = null
-      }
-      if (
-        sttCurrentGenerationIdRef.current
-        && incomingGenerationId
-        && incomingGenerationId !== sttCurrentGenerationIdRef.current
-      ) {
-        if (!canRotateSttTrack && !sendNowRelaxedRotation) {
-          return
-        }
-        sttCurrentTurnIdRef.current = null
-        sttCurrentGenerationIdRef.current = null
-      }
-
-      if (incomingTurnId) {
-        sttCurrentTurnIdRef.current = incomingTurnId
-      }
-      if (incomingGenerationId) {
-        sttCurrentGenerationIdRef.current = incomingGenerationId
-      }
-      suppressTtsUntilNextUserFinalRef.current = false
-      resetAssistantPanels(event.turn_id || null)
-      interruptionInFlightRef.current = false
-      if (event.text.trim()) {
-        lastUserSpeechAtRef.current = Date.now()
-        allowAutoInterruptUntilRef.current = 0
-        if (
-          shouldAutoBargeInterrupt
-          && DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT
-          && !interruptionInFlightRef.current
-          && (ttsPlayingRef.current || ttsStreamActiveRef.current)
-          && isInterruptWorthyPartial(event.text)
-        ) {
-          triggerImmediateInterrupt("stt_partial")
-        }
-      }
-      queueSttUiText(event.text || "", true)
-      setRouteName("routing")
-      setRouteProvider(null)
-      setRouteModel(null)
-      setTurnPhaseStable("processing")
-      const dedupeKey = `${event.turn_id ?? "-"}:${event.text}`
-      const isCommittedUserFinal = typeof event.generation_id === "string" && event.generation_id.length > 0
-      if (isCommittedUserFinal && dedupeKey !== seenUserFinalRef.current && event.text.trim()) {
-        seenUserFinalRef.current = dedupeKey
-        setTranscript((prev) => {
-          const next = [...prev, { role: "user", text: event.text }]
-          return next.length > SESSION_TRANSCRIPT_LIMIT ? next.slice(-SESSION_TRANSCRIPT_LIMIT) : next
-        })
-      }
-      return
-    }
-
-    if (event.type === "route.selected") {
-      if (pendingTurnStartedAtRef.current) {
-        markPendingTurnResolved("route.selected")
-      }
-      if (eventGenerationId && rejectedGenerationIdsRef.current.has(eventGenerationId)) {
-        return
-      }
-      if (eventGenerationId) {
-        activeGenerationIdRef.current = eventGenerationId
-        suppressTtsUntilNextUserFinalRef.current = false
-        startGenerationWatchdog(eventGenerationId)
-      }
-      setRouteName(event.route_name || "selected")
-      setRouteProvider(event.provider ?? null)
-      setRouteModel(event.model ?? null)
-      setTurnPhaseStable("processing")
-      return
-    }
-
-    if (event.type === "llm.phase") {
-      if (pendingTurnStartedAtRef.current) {
-        markPendingTurnResolved("llm.phase")
-      }
-      if (eventGenerationId && rejectedGenerationIdsRef.current.has(eventGenerationId)) {
-        return
-      }
-      if (eventGenerationId) {
-        activeGenerationIdRef.current = eventGenerationId
-        suppressTtsUntilNextUserFinalRef.current = false
-        startGenerationWatchdog(eventGenerationId)
-      }
-      resetAssistantPanels(event.turn_id || null)
-      if (!thinkingPlayerRef.current) {
-        thinkingPlayerRef.current = new ThinkingAudioPlayer(thinkingCueUrl)
-      }
-      if (event.phase === "thinking") {
-        setLlmThinkingActive(true)
-        setThinkingHoldUntil(Date.now() + 1200)
-        setTurnPhaseStable("processing")
-        pendingSpeechAfterThinkingRef.current = false
-        setPendingSpeechAfterThinking(false)
-        clearSpeechWatchdog()
-        void thinkingPlayerRef.current.start()
-      } else if (event.phase === "generating") {
-        setLlmThinkingActive(false)
-        pendingSpeechAfterThinkingRef.current = true
-        setPendingSpeechAfterThinking(true)
-        if (ttsPlayingRef.current || ttsStreamActiveRef.current) {
-          setTurnPhaseStable("agent_speaking")
-        } else {
-          setTurnPhaseStable("processing")
-        }
-        startSpeechWatchdog()
-        thinkingPlayerRef.current.stop()
-      } else {
-        setLlmThinkingActive(false)
-        thinkingPlayerRef.current.stop()
-      }
-      return
-    }
-
-    if (event.type === "llm.reasoning.delta") {
-      if (pendingTurnStartedAtRef.current) {
-        markPendingTurnResolved("llm.reasoning.delta")
-      }
-      if (eventGenerationId && rejectedGenerationIdsRef.current.has(eventGenerationId)) {
-        return
-      }
-      if (eventGenerationId) {
-        activeGenerationIdRef.current = eventGenerationId
-        startGenerationWatchdog(eventGenerationId)
-      }
-      resetAssistantPanels(event.turn_id || null)
-      setLlmThinkingActive(true)
-      llmThinkingUiTextRef.current += event.delta || ""
-      if (mode !== "minimal") {
-        queueLlmThinkingUiText()
-      }
-      if (!ttsPlayingRef.current && !ttsStreamActiveRef.current) {
-        setTurnPhaseStable("processing")
-      }
-      return
-    }
-
-    if (event.type === "llm.response.delta") {
-      if (pendingTurnStartedAtRef.current) {
-        markPendingTurnResolved("llm.response.delta")
-      }
-      if (eventGenerationId && rejectedGenerationIdsRef.current.has(eventGenerationId)) {
-        return
-      }
-      if (eventGenerationId) {
-        activeGenerationIdRef.current = eventGenerationId
-        startGenerationWatchdog(eventGenerationId)
-      }
-      resetAssistantPanels(event.turn_id || null)
-      setLlmThinkingActive(false)
-      const cleanDelta = (event.delta || "")
-        .replace(/\*\*/g, "")
-        .replace(/\*/g, "")
-        .replace(/__/g, "")
-        .replace(/`/g, "")
-      llmResponseTextRef.current += cleanDelta
-      if (mode !== "minimal") {
-        queueLlmResponseUiText()
-      }
-      if (ttsPlayingRef.current || ttsStreamActiveRef.current) {
-        setTurnPhaseStable("agent_speaking")
-      } else {
-        setTurnPhaseStable("processing")
-      }
-      return
-    }
-
-    if (event.type === "llm.completed") {
-      if (pendingTurnStartedAtRef.current) {
-        markPendingTurnResolved("llm.completed")
-      }
-      if (eventGenerationId && rejectedGenerationIdsRef.current.has(eventGenerationId)) {
-        return
-      }
-      if (eventGenerationId) {
-        activeGenerationIdRef.current = eventGenerationId
-        startGenerationWatchdog(eventGenerationId)
-      }
-      resetAssistantPanels(event.turn_id || null)
-      setLlmThinkingActive(false)
-      if (event.provider || event.model) {
-        setRouteProvider(event.provider ?? null)
-        setRouteModel(event.model ?? null)
-        setRouteName((prev) => (prev === "-" || prev === "routing" ? "selected" : prev))
-      }
-      if (event.text.trim()) {
-        llmResponseTextRef.current = event.text
-        if (mode !== "minimal") {
-          queueLlmResponseUiText(true)
-        }
-        setTranscript((prev) => {
-          const next = [...prev, { role: "assistant", text: event.text }]
-          return next.length > SESSION_TRANSCRIPT_LIMIT ? next.slice(-SESSION_TRANSCRIPT_LIMIT) : next
-        })
-      }
-      return
-    }
-
-    if (event.type === "llm.error") {
-      if (pendingTurnStartedAtRef.current) {
-        markPendingTurnResolved("llm.error")
-      }
-      if (eventGenerationId && rejectedGenerationIdsRef.current.has(eventGenerationId)) {
-        return
-      }
-      if (eventGenerationId) {
-        activeGenerationIdRef.current = eventGenerationId
-        startGenerationWatchdog(eventGenerationId)
-      }
-      setLlmThinkingActive(false)
-      pendingSpeechAfterThinkingRef.current = false
-      setPendingSpeechAfterThinking(false)
-      clearSpeechWatchdog()
-      sttCurrentTurnIdRef.current = null
-      sttCurrentGenerationIdRef.current = null
-      await hardStopPlayback()
-      setTurnPhaseStable(sessionRef.current && micRef.current ? "listening" : "idle")
-      const errorMessage = event.error?.message || "unknown error"
-      setLastError(`llm error: ${errorMessage}`)
-      return
-    }
-
-    if (event.type === "llm.summary") {
-      if (event.provider || event.model) {
-        setRouteProvider(event.provider ?? null)
-        setRouteModel(event.model ?? null)
-        setRouteName((prev) => (prev === "-" || prev === "routing" ? "selected" : prev))
-      }
-      return
-    }
-
-    if (event.type === "tts.chunk") {
-      if (pendingTurnStartedAtRef.current) {
-        markPendingTurnResolved("tts.chunk")
-      }
-      if (suppressTtsUntilNextUserFinalRef.current) {
-        await hardStopPlayback()
-        return
-      }
-      if (eventGenerationId && rejectedGenerationIdsRef.current.has(eventGenerationId)) {
-        return
-      }
-      if (
-        eventGenerationId
-        && activeGenerationIdRef.current
-        && eventGenerationId !== activeGenerationIdRef.current
-      ) {
-        if (rejectedGenerationIdsRef.current.has(activeGenerationIdRef.current)) {
-          activeGenerationIdRef.current = eventGenerationId
-        } else {
-          return
-        }
-      }
-      if (!activeGenerationIdRef.current && eventGenerationId) {
-        activeGenerationIdRef.current = eventGenerationId
-        startGenerationWatchdog(eventGenerationId)
-      } else if (eventGenerationId && activeGenerationIdRef.current === eventGenerationId) {
-        startGenerationWatchdog(eventGenerationId)
-      }
-      thinkingPlayerRef.current?.stop()
-      setLlmThinkingActive(false)
-      pendingSpeechAfterThinkingRef.current = false
-      setPendingSpeechAfterThinking(false)
-      clearSpeechWatchdog()
-      ttsStreamActiveRef.current = true
-      setTtsStreamActive(true)
-      setTurnPhaseStable("agent_speaking")
-      return
-    }
-
-    if (event.type === "tts.completed") {
-      if (pendingTurnStartedAtRef.current) {
-        markPendingTurnResolved("tts.completed")
-      }
-      if (eventGenerationId && rejectedGenerationIdsRef.current.has(eventGenerationId)) {
-        return
-      }
-      setLlmThinkingActive(false)
-      ttsStreamActiveRef.current = false
-      setTtsStreamActive(false)
-      pendingSpeechAfterThinkingRef.current = false
-      setPendingSpeechAfterThinking(false)
-      clearSpeechWatchdog()
-      if (!ttsPlayingRef.current) {
-        setTurnPhaseStable(sessionRef.current && micRef.current ? "listening" : "idle")
-      } else {
-        setTurnPhaseStable("agent_speaking")
-      }
-      interruptionInFlightRef.current = false
-      clearGenerationWatchdog()
-      return
-    }
-
-    if (event.type === "conversation.interrupted") {
-      markPendingTurnCancelled("conversation.interrupted")
-      suppressTtsUntilNextUserFinalRef.current = true
-      rejectGeneration(activeGenerationIdRef.current)
-      setLlmThinkingActive(false)
-      ttsPlayingRef.current = false
-      setTtsPlaybackActive(false)
-      ttsStreamActiveRef.current = false
-      setTtsStreamActive(false)
-      pendingSpeechAfterThinkingRef.current = false
-      setPendingSpeechAfterThinking(false)
-      clearSpeechWatchdog()
-      sttCurrentTurnIdRef.current = null
-      sttCurrentGenerationIdRef.current = null
-      setTurnPhaseStable(sessionRef.current && micRef.current ? "listening" : "idle")
-      await hardStopPlayback()
-      interruptionInFlightRef.current = false
-      clearGenerationWatchdog()
-      return
-    }
-
-    if (event.type === "error") {
-      clearGenerationWatchdog()
-      interruptionInFlightRef.current = false
-      suppressTtsUntilNextUserFinalRef.current = false
-      activeGenerationIdRef.current = null
-      ttsPlayingRef.current = false
-      setTtsPlaybackActive(false)
-      ttsStreamActiveRef.current = false
-      setTtsStreamActive(false)
-      setLlmThinkingActive(false)
-      setSessionStatus(`error: ${event.message}`)
-      setTurnPhaseStable(sessionRef.current && micRef.current ? "listening" : "idle")
-    }
-  }, [
-    appendEvent,
-    clearGenerationWatchdog,
-    clearSpeechWatchdog,
-    hardStopPlayback,
-    markPendingTurnCancelled,
-    markPendingTurnResolved,
-    effectiveQueuePolicy,
-    pushTraceLocal,
-    queueLlmResponseUiText,
-    queueLlmThinkingUiText,
-    queueSttUiText,
-    rejectGeneration,
-    resetAssistantPanels,
-    startPendingTurn,
-    startSpeechWatchdog,
-    triggerImmediateInterrupt,
-  ])
-
-  const handleEventSequenced = useCallback((event: ConversationEvent) => {
-    eventChainRef.current = eventChainRef.current
-      .then(() => handleEvent(event))
-      .catch(() => undefined)
-  }, [handleEvent])
+  }, [announceLlmError, appendEvent, clearSpeechWatchdog, setTurnPhaseStable])
 
   const startListening = useCallback(async () => {
     if (!sessionRef.current || isDisconnectingRef.current) return
     if (micRef.current) {
-      setIsListening(true)
+      dispatchSession({ type: "setListeningOnly", isListening: true })
       return
     }
     const lifecycleToken = ++micLifecycleTokenRef.current
@@ -2607,8 +2572,8 @@ export function App() {
     pushTraceLocal("ui.start_listening", {
       session_id: sessionRef.current.sessionId,
     })
-    const mic = new BrowserMicInput(
-      (chunk) => sessionRef.current?.sendAudio(chunk),
+    const mic = new DemoMicInput(
+      (chunk) => agentRef.current?.sendAudio(chunk),
       (level) => {
         const normalizedLevel = Math.max(0, level)
         queueMicLevelUi(Math.min(100, Math.round(level * 140)))
@@ -2687,7 +2652,7 @@ export function App() {
       return
     }
     micRef.current = mic
-    setIsListening(true)
+    dispatchSession({ type: "setListeningOnly", isListening: true })
     if (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready") {
       setTurnPhaseStable("listening")
     }
@@ -2707,7 +2672,7 @@ export function App() {
     const mic = micRef.current
     micRef.current = null
 
-    setIsListening(false)
+    dispatchSession({ type: "setListeningOnly", isListening: false })
     setIsMicHoldActive(false)
     queueMicLevelUi(0, true)
     setMicBands(zeroBands())
@@ -2733,20 +2698,17 @@ export function App() {
       && !DEMO_SEND_NOW_RUNTIME_OWNED_COMMIT
     if (shouldCommitOnStop) {
       const clientTurnId = `ct_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
-      const started = startPendingTurn(clientTurnId)
-      if (started) {
-        pushTraceLocal(
-          "ui.pending_turn.start",
-          {
-            trigger: "mic_stop_commit",
-            client_turn_id: clientTurnId,
-            stabilization_ms: DEMO_SLOW_STT_STABILIZATION_MS,
-            transcript_timeout_ms: DEMO_STT_TRANSCRIPT_TIMEOUT_MS,
-          },
-          "ui.state",
-        )
-        sessionRef.current?.commit(undefined, clientTurnId)
-      }
+      pushTraceLocal(
+        "ui.pending_turn.start",
+        {
+          trigger: "mic_stop_commit",
+          client_turn_id: clientTurnId,
+          stabilization_ms: DEMO_SLOW_STT_STABILIZATION_MS,
+          transcript_timeout_ms: DEMO_STT_TRANSCRIPT_TIMEOUT_MS,
+        },
+        "ui.state",
+      )
+      agentRef.current?.commit(undefined, clientTurnId)
     }
 
     if (sessionStatusRef.current === "speaking") {
@@ -2773,7 +2735,7 @@ export function App() {
       return
     }
     setTurnPhaseStable("idle")
-  }, [pushTraceLocal, queueMicLevelUi, setTurnPhaseStable, startPendingTurn])
+  }, [pushTraceLocal, queueMicLevelUi, setTurnPhaseStable])
 
   const handleMinimalMicToggle = useCallback(async () => {
     if (!sessionRef.current) {
@@ -2838,12 +2800,33 @@ export function App() {
 
   const disconnect = useCallback(async () => {
     isDisconnectingRef.current = true
+    isConnectingRef.current = false
     pushTraceLocal("ui.disconnect", {
       session_id: sessionRef.current?.sessionId ?? null,
     })
-    clearPendingTurn()
     await stopListening()
-    await sessionRef.current?.close().catch(() => undefined)
+    agentSignalUnsubscribeRef.current?.()
+    agentSignalUnsubscribeRef.current = null
+    agentRealtimeSignalUnsubscribeRef.current?.()
+    agentRealtimeSignalUnsubscribeRef.current = null
+    sessionStoreUnsubscribeRef.current?.()
+    sessionStoreUnsubscribeRef.current = null
+    transcriptUnsubscribeRef.current?.()
+    transcriptUnsubscribeRef.current = null
+    pendingTurnUnsubscribeRef.current?.()
+    pendingTurnUnsubscribeRef.current = null
+    sttProgressUnsubscribeRef.current?.()
+    sttProgressUnsubscribeRef.current = null
+    sttFinalMetaUnsubscribeRef.current?.()
+    sttFinalMetaUnsubscribeRef.current = null
+    routeStateUnsubscribeRef.current?.()
+    routeStateUnsubscribeRef.current = null
+    sessionStateUnsubscribeRef.current?.()
+    sessionStateUnsubscribeRef.current = null
+    turnPhaseUnsubscribeRef.current?.()
+    turnPhaseUnsubscribeRef.current = null
+    await agentRef.current?.disconnect().catch(() => undefined)
+    agentRef.current = null
     sessionRef.current = null
     await sdkPlayerRef.current?.flush().catch(() => undefined)
     sdkPlayerRef.current = null
@@ -2854,12 +2837,13 @@ export function App() {
     setTtsPlaybackActive(false)
     ttsStreamActiveRef.current = false
     setTtsStreamActive(false)
+    setTtsVisualCompletedUntil(0)
     pendingSpeechAfterThinkingRef.current = false
     setPendingSpeechAfterThinking(false)
     clearSpeechWatchdog()
     clearMicHoldTimer()
     clearIdleTransitionTimer()
-    setHistorySidebarOpen(false)
+    clearErrorSpeechFallbackTimer()
     micHoldActiveRef.current = false
     suppressMicTapRef.current = false
     minimalMicUserControlledRef.current = false
@@ -2890,11 +2874,25 @@ export function App() {
     setRouteName("-")
     setRouteProvider(null)
     setRouteModel(null)
+    setCurrentSpokenSegment("")
+    setPendingTurnPhase("idle")
+    setPendingTurnElapsedMs(0)
+    pendingTurnTracePhaseRef.current = "idle"
+    pendingTurnTraceElapsedRef.current = 0
+    setSttProgressState({ status: null, waitedMs: null, attempt: null })
+    setSttFinalMetaState({ revision: null, finality: null, deferred: null, previousText: null })
     activeAssistantTurnIdRef.current = null
     interruptionInFlightRef.current = false
     suppressTtsUntilNextUserFinalRef.current = false
     activeGenerationIdRef.current = null
     rejectedGenerationIdsRef.current.clear()
+    try {
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel()
+      }
+    } catch {
+      // ignore speech-synthesis cleanup errors
+    }
     localBargeInFramesRef.current = 0
     localBargeInCooldownUntilRef.current = 0
     localBargeInNoiseFloorRef.current = 0
@@ -2911,9 +2909,9 @@ export function App() {
     clearLlmThinkingUiTimer,
     clearMicLevelUiTimer,
     clearMicHoldTimer,
-    clearPendingTurn,
     clearSttUiTimer,
     clearGenerationWatchdog,
+    clearErrorSpeechFallbackTimer,
     clearSpeechWatchdog,
     flushLlmResponseUiText,
     flushLlmThinkingUiText,
@@ -2925,9 +2923,11 @@ export function App() {
   ])
 
   const connect = useCallback(async (forcedSessionId?: string) => {
-    if (sessionRef.current) return
+    if (sessionRef.current || isConnectingRef.current || isDisconnectingRef.current) return
+    isConnectingRef.current = true
     setLastError("")
     let resumeSessionId = forcedSessionId?.trim() || requestedSessionId?.trim() || undefined
+    let resumeFallbackReason: string | null = null
     let traceReporter: FrontendTraceReporter | null = null
     try {
       await checkEngineReadiness(baseUrl)
@@ -2936,10 +2936,27 @@ export function App() {
       }
 
       const client = new OpenVoiceWebClient({ baseUrl })
+      const agent = client.createVoiceAgent()
       if (resumeSessionId) {
-        const existing = await client.http.getSession(resumeSessionId)
-        if (isSessionClosedOrFailed(existing.status)) {
-          throw new Error(`requested session is ${existing.status}`)
+        try {
+          const existing = await client.http.getSession(resumeSessionId)
+          if (isSessionClosedOrFailed(existing.status)) {
+            resumeFallbackReason = `requested session is ${existing.status}`
+            resumeSessionId = undefined
+            persistSessionIdToUrl(null)
+            setRequestedSessionId(null)
+            requestedSessionLoadAttemptRef.current = null
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          if (!isRecoverableResumeErrorMessage(message)) {
+            throw error
+          }
+          resumeFallbackReason = message
+          resumeSessionId = undefined
+          persistSessionIdToUrl(null)
+          setRequestedSessionId(null)
+          requestedSessionLoadAttemptRef.current = null
         }
       }
       if (!sdkPlayerRef.current) {
@@ -2951,6 +2968,9 @@ export function App() {
             ttsPlayingRef.current = active
             setTtsPlaybackActive(active)
             if (active) {
+              thinkingPlayerRef.current?.stop()
+              clearErrorSpeechFallbackTimer()
+              setTtsVisualCompletedUntil(0)
               pendingSpeechAfterThinkingRef.current = false
               setPendingSpeechAfterThinking(false)
               clearSpeechWatchdog()
@@ -2989,24 +3009,30 @@ export function App() {
         autoStart: false,
         verifyEngines: false,
         traceReporter,
-        onEvent: (event: ConversationEvent) => {
-          handleEventSequenced(event)
-        },
+        onEvent: handleRawEvent,
+        debug: true,
       }
 
       let session: WebVoiceSession
       let resumedExistingSession = false
       if (resumeSessionId) {
-        session = await client.connectSession({
+        session = await agent.connect({
           ...baseConnectOptions,
           sessionId: resumeSessionId,
         })
         resumedExistingSession = true
       } else {
-        session = await client.connectSession(baseConnectOptions)
+        session = await agent.connect(baseConnectOptions)
       }
 
       traceReporter.setSessionId(session.sessionId)
+      if (resumeFallbackReason) {
+        traceReporter.trackLocal("ui.resume_session_fallback", {
+          requested_session_id: forcedSessionId ?? requestedSessionId ?? null,
+          reason: resumeFallbackReason,
+          connected_session_id: session.sessionId,
+        })
+      }
       traceReporter.trackLocal("ui.connected", {
         runtime_url: baseUrl,
         mode,
@@ -3015,20 +3041,87 @@ export function App() {
       })
 
       sessionRef.current = session
+      agentRef.current = agent
+      agentSignalUnsubscribeRef.current?.()
+      sessionStoreUnsubscribeRef.current?.()
+      transcriptUnsubscribeRef.current?.()
+      pendingTurnUnsubscribeRef.current?.()
+      sttProgressUnsubscribeRef.current?.()
+      sttFinalMetaUnsubscribeRef.current?.()
+      routeStateUnsubscribeRef.current?.()
+      agentRealtimeSignalUnsubscribeRef.current?.()
+      agentSignalUnsubscribeRef.current = agent.onSignal(handleAgentSignal)
+      sessionStoreUnsubscribeRef.current = session.store.subscribeSelector(
+        selectCurrentSpokenSegment,
+        (nextSegment) => {
+          dispatchSession({ type: "setCurrentSpokenSegmentOnly", currentSpokenSegment: nextSegment.text ?? "" })
+        },
+        { emitCurrent: true },
+      )
+      transcriptUnsubscribeRef.current = session.store.subscribeSelector(
+        selectTranscript,
+        (nextTranscript) => {
+          dispatchSession({ type: "setTranscript", transcript: nextTranscript })
+        },
+        { emitCurrent: true },
+      )
+      sttProgressUnsubscribeRef.current = session.store.subscribeSelector(
+        selectSttProgress,
+        (nextProgress) => {
+          dispatchSession({ type: "setSttProgress", progress: nextProgress })
+        },
+        { emitCurrent: true },
+      )
+      sttFinalMetaUnsubscribeRef.current = session.store.subscribeSelector(
+        selectSttFinalMeta,
+        (nextMeta) => {
+          dispatchSession({ type: "setSttFinalMeta", meta: nextMeta })
+        },
+        { emitCurrent: true },
+      )
+      pendingTurnUnsubscribeRef.current = session.store.subscribeSelector(
+        selectPendingTurnState,
+        (nextPendingTurn) => {
+          dispatchSession({ type: "setPendingTurn", phase: nextPendingTurn.phase, elapsedMs: nextPendingTurn.elapsedMs })
+        },
+        { emitCurrent: true },
+      )
+      routeStateUnsubscribeRef.current = session.store.subscribeSelector(
+        selectRouteState,
+        (nextRoute) => {
+          dispatchSession({ type: "setRoute", routeName: nextRoute.routeName ?? "-", provider: nextRoute.provider, model: nextRoute.model })
+        },
+        { emitCurrent: true },
+      )
+      sessionStateUnsubscribeRef.current = session.onStateChange((state) => {
+        dispatchSession({ type: "setSessionIdOnly", sessionId: state.sessionId })
+        dispatchSession({ type: "setSessionStatusOnly", sessionStatus: state.sessionStatus === "disconnected" ? "disconnected" : state.sessionStatus })
+        dispatchSession({ type: "setTurnPhaseOnly", turnPhase: state.turnPhase })
+        if (state.sessionStatus === "listening" || state.sessionStatus === "ready") {
+          dispatchSession({ type: "setListeningOnly", isListening: true })
+        }
+        if (state.stt.interimText) {
+          dispatchSession({ type: "setSttLiveText", text: state.stt.interimText })
+        }
+        dispatchSession({ type: "setLlmThinking", text: state.llm.thinkingText, active: state.llm.phase === "thinking" || state.llm.phase === "generating" })
+        dispatchSession({ type: "setLlmResponse", text: state.llm.responseText })
+        dispatchSession({ type: "setCurrentSpokenSegmentOnly", currentSpokenSegment: state.tts.currentSpokenSegment ?? "" })
+      })
+      turnPhaseUnsubscribeRef.current = session.store.subscribeSelector(
+        selectTurnPhase,
+        (nextTurnPhase) => {
+          dispatchSession({ type: "setTurnPhaseOnly", turnPhase: nextTurnPhase })
+        },
+        { emitCurrent: true },
+      )
       historyTranscriptRequestedRef.current.add(session.sessionId)
       persistSessionIdToUrl(session.sessionId)
       setRequestedSessionId(session.sessionId)
       setSessionId(session.sessionId)
+      if (resumeFallbackReason) {
+        setLastError("Requested session was unavailable, so a new session was started.")
+      }
       setSessionStatus("connected")
-      setTurnPhaseStable(micRef.current ? "listening" : "idle")
-      const localSeedTranscript = readStoredSessionHistory()
-        .find((item) => item.sessionId === session.sessionId)
-        ?.transcript ?? []
-      setTranscript(
-        resumedExistingSession && localSeedTranscript.length > 0
-          ? localSeedTranscript.slice(-SESSION_TRANSCRIPT_LIMIT)
-          : [],
-      )
       clearEventFlushTimer()
       eventBufferRef.current = []
       setEvents([])
@@ -3052,12 +3145,18 @@ export function App() {
       setTtsPlaybackActive(false)
       ttsStreamActiveRef.current = false
       setTtsStreamActive(false)
+      setTtsVisualCompletedUntil(0)
       pendingSpeechAfterThinkingRef.current = false
       setPendingSpeechAfterThinking(false)
       clearSpeechWatchdog()
-      clearPendingTurn()
       activeAssistantTurnIdRef.current = null
       interruptionInFlightRef.current = false
+      setPendingTurnPhase("idle")
+      setPendingTurnElapsedMs(0)
+      pendingTurnTracePhaseRef.current = "idle"
+      pendingTurnTraceElapsedRef.current = 0
+      setSttProgressState({ status: null, waitedMs: null, attempt: null })
+      setSttFinalMetaState({ revision: null, finality: null, deferred: null, previousText: null })
       suppressTtsUntilNextUserFinalRef.current = false
       activeGenerationIdRef.current = null
       rejectedGenerationIdsRef.current.clear()
@@ -3085,7 +3184,7 @@ export function App() {
       }
       requestedSessionLoadAttemptRef.current = null
     } catch (error) {
-      setLlmThinkingActive(false)
+      // now derived from SDK state
       if (!sessionRef.current && traceReporter) {
         traceReporter.trackLocal("ui.connect_failed", {
           runtime_url: baseUrl,
@@ -3096,10 +3195,13 @@ export function App() {
       const message = error instanceof Error ? error.message : String(error)
       setLastError(message)
       setSessionStatus(`connect failed: ${message}`)
+    } finally {
+      isConnectingRef.current = false
     }
   }, [
     baseUrl,
     checkEngineReadiness,
+    clearErrorSpeechFallbackTimer,
     clearEventFlushTimer,
     clearLlmResponseUiTimer,
     clearLlmThinkingUiTimer,
@@ -3112,7 +3214,7 @@ export function App() {
     flushLlmResponseUiText,
     flushLlmThinkingUiText,
     flushSttUiText,
-    handleEventSequenced,
+    handleRawEvent,
     mode,
     effectiveQueuePolicy,
     loadSessionTranscript,
@@ -3126,9 +3228,6 @@ export function App() {
   ])
 
   useEffect(() => {
-    if (mode !== "minimal") {
-      return
-    }
     if (isSwitchingSession) {
       return
     }
@@ -3146,7 +3245,7 @@ export function App() {
     }
     requestedSessionLoadAttemptRef.current = fromUrl
     void connect(fromUrl)
-  }, [connect, isSwitchingSession, mode, requestedSessionId])
+  }, [connect, isSwitchingSession, requestedSessionId])
 
   const resumeHistorySession = useCallback(async (targetSessionId: string) => {
     const normalized = targetSessionId.trim()
@@ -3162,29 +3261,42 @@ export function App() {
     setIsSwitchingSession(true)
     requestedSessionLoadAttemptRef.current = normalized
     setSelectedHistorySessionId(normalized)
-    persistSessionIdToUrl(normalized)
-    setRequestedSessionId(normalized)
-    setHistorySidebarOpen(false)
+    const cachedTranscript = sessionHistory.find((item) => item.sessionId === normalized)?.transcript ?? []
     try {
       await disconnect()
+      // Set URL and state AFTER disconnect clears them
+      persistSessionIdToUrl(normalized)
+      setRequestedSessionId(normalized)
+      // Ensure sessionRef is cleared before connecting
+      sessionRef.current = null
       await connect(normalized)
+      // Load transcript for the resumed session
+      if (sessionRef.current) {
+        if (cachedTranscript.length > 0) {
+          sessionRef.current.store.dispatch(toSetTranscriptAction(cachedTranscript))
+        }
+        await loadSessionTranscript(sessionRef.current.sessionId, { setActiveTranscript: true })
+      }
+      setHistorySidebarOpen(false)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      setLastError(message)
     } finally {
       setIsSwitchingSession(false)
     }
-  }, [connect, disconnect])
+  }, [connect, disconnect, loadSessionTranscript, sessionHistory])
 
-  const interrupt = useCallback(() => {
+  const interrupt = useCallback(async () => {
     if (!sessionRef.current) return
     pushTraceLocal("ui.interrupt", { reason: "demo" })
     interruptionInFlightRef.current = true
     suppressTtsUntilNextUserFinalRef.current = true
     rejectGeneration(activeGenerationIdRef.current)
     activeGenerationIdRef.current = null
-    clearPendingTurn()
     setTurnPhaseStable("idle")
-    void hardStopPlayback()
-    sessionRef.current.interrupt("demo")
-  }, [clearPendingTurn, hardStopPlayback, pushTraceLocal, rejectGeneration, setTurnPhaseStable])
+    await hardStopPlayback()
+    await agentRef.current?.interrupt("demo")
+  }, [hardStopPlayback, pushTraceLocal, rejectGeneration, setTurnPhaseStable])
 
   useEffect(() => {
     disconnectForCleanupRef.current = disconnect
@@ -3192,6 +3304,8 @@ export function App() {
 
   useEffect(() => {
     if (mode !== "minimal") return
+    if (startupCommittedRef.current) return
+    startupCommittedRef.current = true
     if (historySidebarOpen) return
     if (requestedSessionId?.trim()) return
     if (isSwitchingSession) return
@@ -3200,7 +3314,7 @@ export function App() {
         if (!sessionRef.current) {
           await connect()
         } else {
-          sessionRef.current.updateConfig({ turnQueue: { policy: "send_now" } })
+          agentRef.current?.updateConfig({ turnQueue: { policy: "send_now" } })
         }
         if (!minimalMicUserControlledRef.current && !micRef.current && sessionRef.current) {
           await startListening()
@@ -3393,19 +3507,38 @@ export function App() {
       clearMicLevelUiTimer()
       clearMicHoldTimer()
       clearIdleTransitionTimer()
+      clearErrorSpeechFallbackTimer()
       clearSpeechWatchdog()
+      agentSignalUnsubscribeRef.current?.()
+      agentSignalUnsubscribeRef.current = null
+      agentRealtimeSignalUnsubscribeRef.current?.()
+      agentRealtimeSignalUnsubscribeRef.current = null
+      sessionStoreUnsubscribeRef.current?.()
+      sessionStoreUnsubscribeRef.current = null
+      transcriptUnsubscribeRef.current?.()
+      transcriptUnsubscribeRef.current = null
+      pendingTurnUnsubscribeRef.current?.()
+      pendingTurnUnsubscribeRef.current = null
+      sttProgressUnsubscribeRef.current?.()
+      sttProgressUnsubscribeRef.current = null
+      sttFinalMetaUnsubscribeRef.current?.()
+      sttFinalMetaUnsubscribeRef.current = null
+      routeStateUnsubscribeRef.current?.()
+      routeStateUnsubscribeRef.current = null
+      sessionStateUnsubscribeRef.current?.()
+      sessionStateUnsubscribeRef.current = null
+      turnPhaseUnsubscribeRef.current?.()
+      turnPhaseUnsubscribeRef.current = null
+      try {
+        if ("speechSynthesis" in window) {
+          window.speechSynthesis.cancel()
+        }
+      } catch {
+        // ignore speech-synthesis cleanup errors
+      }
       void disconnectForCleanupRef.current?.()
     }
-  }, [
-    clearEventFlushTimer,
-    clearIdleTransitionTimer,
-    clearLlmResponseUiTimer,
-    clearLlmThinkingUiTimer,
-    clearMicLevelUiTimer,
-    clearMicHoldTimer,
-    clearSpeechWatchdog,
-    clearSttUiTimer,
-  ])
+  }, [])
 
   useEffect(() => {
     return () => {
@@ -3453,20 +3586,20 @@ export function App() {
 
   const radialClass = useMemo(() => {
     if (isMicDisconnectedView) return "idle"
-    if (turnPhase === "agent_speaking") return "speaking"
-    if (turnPhase === "user_speaking") return "speaking"
-    if (turnPhase === "processing") return "thinking"
+    if (visualTurnPhase === "agent_speaking") return "speaking"
+    if (visualTurnPhase === "user_speaking") return "speaking"
+    if (visualTurnPhase === "processing") return "thinking"
     if (sessionStatus !== "disconnected") return "ready"
     return "idle"
-  }, [isMicDisconnectedView, sessionStatus, turnPhase])
+  }, [isMicDisconnectedView, sessionStatus, visualTurnPhase])
 
   if (mode === "minimal") {
     return (
       <main className="shell shell-minimal" aria-label="Open Voice SDK minimal mode">
-        {historySidebarOpen && minimalChatHistoryEnabled ? (
+        {historySidebarOpen ? (
           <aside className="history-overlay" aria-hidden="true" />
         ) : null}
-        {historySidebarOpen && minimalChatHistoryEnabled ? (
+        {historySidebarOpen ? (
           <aside className="history-sidebar" ref={historySidebarRef} aria-label="Conversation history">
             <div className="history-sidebar-head">
               <h2>Recent chats</h2>
@@ -3557,6 +3690,7 @@ export function App() {
               ) : (
                 <GridVisualizer
                   state={radialClass}
+                  speakingRole={visualTurnPhase === "agent_speaking" ? "agent" : "user"}
                   level={Math.max(0.08, micLevel / 100)}
                   rowCount={9}
                   columnCount={9}
@@ -3614,12 +3748,6 @@ export function App() {
               {pendingTurnMessage || " "}
             </p>
             <p
-              className={`pending-text minimal-pending minimal-pending-inline${sttProgressMessage ? " is-visible" : ""}`}
-              aria-live="polite"
-            >
-              {sttProgressMessage || " "}
-            </p>
-            <p
               className={`pending-text minimal-pending minimal-pending-inline${sttFinalMetaMessage ? " is-visible" : ""}`}
               aria-live="polite"
             >
@@ -3643,30 +3771,12 @@ export function App() {
                   </div>
                   <div className="minimal-detail-item">
                     <p className="minimal-detail-label">Turn</p>
-                    <p className="minimal-detail-value">{turnPhase}</p>
+                    <p className="minimal-detail-value">{visualTurnPhase}</p>
                   </div>
                   <div className="minimal-detail-item">
                     <p className="minimal-detail-label">LLM</p>
                     <p className="minimal-detail-value">{routeModelLabel}</p>
                   </div>
-                </div>
-              </Card>
-            ) : null}
-
-            {showInlineMinimalHistory ? (
-              <Card className="minimal-history-card" aria-live="polite">
-                <div className="minimal-history-head">
-                  <p className="minimal-detail-label">Current chat history</p>
-                  <p className="minimal-detail-value">{activeSessionHistoryCards.length} items</p>
-                </div>
-                <div className="minimal-history-list">
-                  {activeSessionHistoryCards.length === 0 ? (
-                    <p className="history-empty">No conversation turns yet.</p>
-                  ) : activeSessionHistoryCards.map((item, index) => (
-                    <p key={`active-history-${index}`} className={`history-line ${item.role}`}>
-                      <strong>{item.role === "user" ? "You" : "AI"}:</strong> {transcriptSummaryText(item)}
-                    </p>
-                  ))}
                 </div>
               </Card>
             ) : null}
@@ -3694,11 +3804,14 @@ export function App() {
                   </Button>
                   <Button
                     type="button"
-                    className={`minimal-setting-toggle${minimalChatHistoryEnabled ? " enabled" : ""}`}
-                    onClick={() => setMinimalChatHistoryEnabled((prev) => !prev)}
+                    className="minimal-setting-toggle"
+                    onClick={() => {
+                      setMinimalSettingsOpen(false)
+                      openHistoryPanel()
+                    }}
                   >
-                    <span>Chat history</span>
-                    <span aria-hidden="true">{minimalChatHistoryEnabled ? "On" : "Off"}</span>
+                    <span>History</span>
+                    <span aria-hidden="true">Open</span>
                   </Button>
                 </Card>
               ) : null}
@@ -3721,21 +3834,6 @@ export function App() {
                 </svg>
               </Button>
             </div>
-
-            {minimalChatHistoryEnabled ? (
-              <Button
-                type="button"
-                className="history-toggle-btn"
-                onClick={openHistoryPanel}
-                aria-label="Open chat history"
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                  <path d="M4 5h16v14H8l-4 3V5" />
-                  <line x1="8" y1="10" x2="16" y2="10" />
-                  <line x1="8" y1="14" x2="14" y2="14" />
-                </svg>
-              </Button>
-            ) : null}
           </article>
         </section>
       </main>
@@ -3744,6 +3842,72 @@ export function App() {
 
   return (
     <main className="shell" aria-label="Open Voice SDK integration demo">
+      {historySidebarOpen ? (
+        <aside className="history-overlay" aria-hidden="true" onClick={closeHistoryPanel} />
+      ) : null}
+      {historySidebarOpen ? (
+        <aside className="history-sidebar" ref={historySidebarRef} aria-label="Conversation history">
+          <div className="history-sidebar-head">
+            <h2>Recent chats</h2>
+            <div className="history-sidebar-actions">
+              <Button
+                type="button"
+                className="history-open-session-btn"
+                onClick={() => void resumeHistorySession(selectedHistorySession?.sessionId ?? "")}
+                disabled={
+                  isSwitchingSession
+                  || !selectedHistorySession
+                  || selectedHistorySession.sessionId === sessionRef.current?.sessionId
+                }
+              >
+                {isSwitchingSession ? "Opening..." : "Open selected"}
+              </Button>
+              <Button type="button" className="history-close-btn" onClick={closeHistoryPanel}>Close</Button>
+            </div>
+          </div>
+          <p className="history-subtitle">Last {SESSION_HISTORY_LIMIT} chats</p>
+          {historyLoading ? <p className="history-status">Loading history...</p> : null}
+          {historyError ? <p className="history-status history-status-error">{historyError}</p> : null}
+          <div className="history-list" role="list">
+            {recentHistoryItems.length === 0 ? (
+              <p className="history-status">No previous sessions yet.</p>
+            ) : null}
+            {recentHistoryItems.map((item) => {
+              const isCurrent = item.sessionId === sessionRef.current?.sessionId
+              const isSelected = item.sessionId === selectedHistorySessionId
+              return (
+                <article
+                  key={item.sessionId}
+                  role="listitem"
+                  className={`history-item${isCurrent ? " current" : ""}${isSelected ? " selected" : ""}`}
+                >
+                  <button
+                    type="button"
+                    className="history-open-btn"
+                    onClick={() => void resumeHistorySession(item.sessionId)}
+                    disabled={isCurrent || isSwitchingSession}
+                    title={isCurrent ? "Current session" : "Open this session"}
+                  >
+                    <span className="history-item-title">{item.title}</span>
+                    <span className="history-item-meta">{item.status} · {item.completedTurnCount} turns</span>
+                  </button>
+                  {item.transcript.length > 0 ? (
+                    <div className="history-item-preview" aria-live="polite">
+                      {item.transcript.slice(-3).map((turn, index) => (
+                        <p key={`${item.sessionId}-${index}`} className={`history-line ${turn.role}`}>
+                          <strong>{turn.role === "user" ? "You" : "AI"}:</strong> {transcriptSummaryText(turn)}
+                        </p>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="history-empty">No transcript captured yet.</p>
+                  )}
+                </article>
+              )
+            })}
+          </div>
+        </aside>
+      ) : null}
       <Card className="hero">
         <h1>OpenVoice SDK Demo</h1>
         <dl className="hero-status" aria-live="polite">
@@ -3790,13 +3954,13 @@ export function App() {
           <Button disabled={!sessionRef.current || isListening} onClick={() => void startListening()}>Start listening</Button>
           <Button disabled={!isListening} onClick={() => void stopListening()}>Stop listening</Button>
           <Button disabled={!sessionRef.current} onClick={interrupt}>Interrupt</Button>
+          {/* <Button type="button" onClick={openHistoryPanel}>History</Button> */}
         </div>
         {!isListening && sessionRef.current ? (
           <p className="error-text">Mic is not streaming yet. Click `Start listening` or allow microphone permission.</p>
         ) : null}
         {lastError ? <p className="error-text">{lastError}</p> : null}
         {pendingTurnMessage ? <p className="pending-text">{pendingTurnMessage}</p> : null}
-        {sttProgressMessage ? <p className="pending-text">{sttProgressMessage}</p> : null}
         {sttFinalMetaMessage ? <p className="pending-text">{sttFinalMetaMessage}</p> : null}
       </Card>
 
@@ -3818,7 +3982,6 @@ export function App() {
           <h2>STT (Realtime user transcript)</h2>
           <div className="stream-card">{sttLiveText || " "}</div>
           <p className="subcopy">Mic level: {micLevel}%</p>
-          {sttProgressMessage ? <p className="subcopy">{sttProgressMessage}</p> : null}
           {sttFinalMetaMessage ? <p className="subcopy">{sttFinalMetaMessage}</p> : null}
         </Card>
         <Card className="stage">
@@ -3828,6 +3991,7 @@ export function App() {
         <Card className="stage">
           <h2>LLM Response</h2>
           <div className="stream-card">{llmResponseText || " "}</div>
+          <p className="subcopy">Speaking now: {currentSpokenSegment || "-"}</p>
         </Card>
         <Card className="stage transcript-stage">
           <h2>Transcript</h2>

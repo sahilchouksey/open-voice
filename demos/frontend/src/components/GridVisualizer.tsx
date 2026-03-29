@@ -12,11 +12,14 @@ interface GridVisualizerProps {
   state: MinimalVisualizerState
   level: number
   bands?: number[]
+  speakingRole?: "agent" | "user"
   rowCount?: number
   columnCount?: number
   radius?: number
   interval?: number
 }
+
+const SPEAKING_WAVE_SPEED = 0.28
 
 interface Coordinate {
   x: number
@@ -83,6 +86,7 @@ export function GridVisualizer({
   state,
   level,
   bands,
+  speakingRole = "agent",
   rowCount = 7,
   columnCount = 7,
   radius,
@@ -92,6 +96,7 @@ export function GridVisualizer({
   const total = rowCount * columnCount
 
   const [index, setIndex] = useState(0)
+  const [waveTick, setWaveTick] = useState(0)
   const [sequence, setSequence] = useState<Coordinate[]>(() => [
     { x: Math.floor(columnCount / 2), y: Math.floor(rowCount / 2) },
   ])
@@ -124,6 +129,19 @@ export function GridVisualizer({
 
     return () => window.clearInterval(timer)
   }, [gridState, interval])
+
+  useEffect(() => {
+    if (gridState !== "speaking" || speakingRole !== "agent") {
+      setWaveTick(0)
+      return
+    }
+
+    const timer = window.setInterval(() => {
+      setWaveTick((prev) => prev + 1)
+    }, Math.max(40, Math.floor(interval * 0.55)))
+
+    return () => window.clearInterval(timer)
+  }, [gridState, interval, speakingRole])
 
   const highlightedCoordinate = sequence[index % sequence.length] ?? {
     x: Math.floor(columnCount / 2),
@@ -163,12 +181,30 @@ export function GridVisualizer({
         let isHighlighted = false
         let transitionDuration = interval / 100
 
-        if (gridState === "speaking") {
+        if (gridState === "speaking" && speakingRole === "user") {
+          // Preserve the legacy user-speaking animation behavior.
           const rowMidPoint = Math.floor(rowCount / 2)
           const volumeChunks = 1 / (rowMidPoint + 1)
           const distanceToMid = Math.abs(rowMidPoint - row)
           const threshold = distanceToMid * volumeChunks
           isHighlighted = (volumeBands[i % columnCount] ?? 0) >= threshold
+        } else if (gridState === "speaking") {
+          // Keep speaking visual tied to audio bands (like listening), but smoother
+          // and fuller with a gentle traveling wave accent.
+          const rowMidPoint = Math.floor(rowCount / 2)
+          const col = i % columnCount
+          const bandLevel = volumeBands[col] ?? 0
+          const distanceToMid = Math.abs(rowMidPoint - row)
+          const rowFalloff = distanceToMid / Math.max(1, rowMidPoint)
+
+          const wavePhase = waveTick * SPEAKING_WAVE_SPEED - col * 0.65 - row * 0.4
+          const waveBoost = ((Math.sin(wavePhase) + 1) / 2) * 0.16
+          const energy = Math.max(0, Math.min(1, bandLevel + waveBoost))
+
+          // Audio-first fill logic: rows near center fill earlier, outer rows with higher energy.
+          const threshold = Math.max(0.06, rowFalloff * 0.78)
+          isHighlighted = energy >= threshold
+          transitionDuration = Math.max(0.09, interval / 1200)
         } else {
           isHighlighted =
             highlightedCoordinate.x === i % columnCount &&
@@ -181,6 +217,8 @@ export function GridVisualizer({
             key={i}
             className="grid-dot"
             data-highlighted={isHighlighted ? "true" : "false"}
+            data-grid-state={gridState}
+            data-grid-speaker={gridState === "speaking" ? speakingRole : "none"}
             style={
               {
                 transitionDuration: `${transitionDuration}s`,

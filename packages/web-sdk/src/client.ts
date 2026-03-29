@@ -11,6 +11,7 @@ import { WebVoiceSession } from "./session"
 import { RuntimeHttpClient, type RuntimeHttpClientOptions, type SessionCreateRequest } from "./transport/http"
 import { RealtimeConversationSocket, type ConversationListener } from "./transport/websocket"
 import type { FrontendTraceReporter } from "./diagnostics/trace"
+import { VoiceAgent } from "./agent/voice_agent"
 
 export interface OpenVoiceWebClientOptions extends RuntimeHttpClientOptions {
   webSocket?: typeof WebSocket
@@ -27,6 +28,7 @@ export interface ConnectSessionOptions {
   autoStart?: boolean
   verifyEngines?: boolean
   traceReporter?: FrontendTraceReporter
+  debug?: boolean
 }
 
 export class OpenVoiceWebClient {
@@ -68,6 +70,7 @@ export class OpenVoiceWebClient {
 
     const session = new WebVoiceSession(state.session_id, socket, {
       audioOutput: opts.audioOutput,
+      debug: opts.debug,
     })
     if (opts.onEvent) session.onEvent(opts.onEvent)
 
@@ -84,6 +87,10 @@ export class OpenVoiceWebClient {
 
     if (opts.input) await session.attachInput(opts.input)
     return session
+  }
+
+  createVoiceAgent(): VoiceAgent {
+    return new VoiceAgent(this)
   }
 
   ensureRealtimeAudioEnginesReady(catalog: EngineCatalogResponse): void {

@@ -1,10 +1,24 @@
 import type {
+  ClientMessage,
   ConversationEvent,
   SessionStatus,
   VadStateEvent,
 } from "./protocol"
 
+const PENDING_TURN_TIMEOUT_MS = 25000
+export const PENDING_TURN_SLOW_MS = 2000
+export const PENDING_TURN_DEGRADED_MS = 8000
+export { PENDING_TURN_TIMEOUT_MS }
+
 export type TurnPhase = "idle" | "listening" | "user_speaking" | "processing" | "agent_speaking"
+
+export interface TranscriptEntry {
+  role: "user" | "assistant"
+  text: string
+  turnId?: string
+}
+
+const TRANSCRIPT_LIMIT = 100
 
 export interface VoiceSessionState {
   sessionId: string
@@ -21,6 +35,13 @@ export interface VoiceSessionState {
     finalText: string
     lastFinalTurnId?: string | null
     lastFinalText?: string | null
+    status?: string | null
+    waitedMs?: number | null
+    attempt?: number | null
+    revision?: number | null
+    finality?: "stable" | "revised" | "duplicate" | null
+    deferred?: boolean | null
+    previousText?: string | null
   }
   route: {
     routeName?: string | null
@@ -35,11 +56,20 @@ export interface VoiceSessionState {
   tts: {
     status: "idle" | "playing" | "complete"
     durationMs?: number | null
+    currentSpokenSegment?: string | null
+    currentSpokenGenerationId?: string | null
+    currentSpokenUpdatedAt?: string | null
   }
   queue: {
     pendingTurns: number
     policy?: string | null
     lastSource?: string | null
+  }
+  pendingTurn: {
+    phase: "idle" | "commit_sent" | "awaiting_backend" | "slow" | "degraded" | "timeout"
+    clientTurnId?: string | null
+    startedAtMs?: number | null
+    elapsedMs: number
   }
   metrics: {
     queueDelayMs?: number | null
@@ -52,6 +82,7 @@ export interface VoiceSessionState {
     cancelled: boolean
     reason?: string | null
   }
+  transcript: TranscriptEntry[]
 }
 
 export function createVoiceSessionState(sessionId: string): VoiceSessionState {
@@ -68,6 +99,13 @@ export function createVoiceSessionState(sessionId: string): VoiceSessionState {
       finalText: "",
       lastFinalTurnId: null,
       lastFinalText: null,
+      status: null,
+      waitedMs: null,
+      attempt: null,
+      revision: null,
+      finality: null,
+      deferred: null,
+      previousText: null,
     },
     route: {},
     llm: {
@@ -76,13 +114,23 @@ export function createVoiceSessionState(sessionId: string): VoiceSessionState {
     },
     tts: {
       status: "idle",
+      currentSpokenSegment: null,
+      currentSpokenGenerationId: null,
+      currentSpokenUpdatedAt: null,
     },
     queue: {
       pendingTurns: 0,
     },
+    pendingTurn: {
+      phase: "idle",
+      clientTurnId: null,
+      startedAtMs: null,
+      elapsedMs: 0,
+    },
     metrics: {
       cancelled: false,
     },
+    transcript: [],
   }
 }
 
@@ -99,6 +147,7 @@ export function reduceVoiceSessionEvent(
     llm: { ...state.llm },
     tts: { ...state.tts },
     queue: { ...state.queue },
+    pendingTurn: { ...state.pendingTurn },
     metrics: { ...state.metrics },
   }
 
@@ -109,6 +158,20 @@ export function reduceVoiceSessionEvent(
       return next
     case "session.status":
       next.sessionStatus = event.status
+      if (event.status === "transcribing" && next.pendingTurn.phase !== "idle") {
+        next.pendingTurn.phase = "awaiting_backend"
+      }
+      if (
+        (event.status === "interrupted"
+          || event.status === "closed"
+          || event.status === "failed")
+        && next.pendingTurn.phase !== "idle"
+      ) {
+        next.pendingTurn.phase = "idle"
+        next.pendingTurn.clientTurnId = null
+        next.pendingTurn.startedAtMs = null
+        next.pendingTurn.elapsedMs = 0
+      }
       next.turnPhase = deriveTurnPhase(next)
       return next
     case "vad.state":
@@ -121,6 +184,13 @@ export function reduceVoiceSessionEvent(
       return next
     case "stt.partial":
       next.stt.interimText = event.text
+      next.stt.status = "transcribing"
+      next.turnPhase = deriveTurnPhase(next)
+      return next
+    case "stt.status":
+      next.stt.status = event.status
+      next.stt.waitedMs = event.waited_ms ?? null
+      next.stt.attempt = event.attempt ?? null
       next.turnPhase = deriveTurnPhase(next)
       return next
     case "stt.final":
@@ -133,6 +203,11 @@ export function reduceVoiceSessionEvent(
       next.stt.finalText = event.text
       next.stt.lastFinalTurnId = event.turn_id ?? null
       next.stt.lastFinalText = event.text
+      next.stt.revision = event.revision ?? null
+      next.stt.finality = event.finality ?? null
+      next.stt.deferred = event.deferred ?? null
+      next.stt.previousText = event.previous_text ?? null
+      next.stt.status = "waiting_final"
       next.stt.interimText = ""
       next.route = {}
       next.llm.thinkingText = ""
@@ -141,63 +216,131 @@ export function reduceVoiceSessionEvent(
       next.tts.durationMs = undefined
       next.metrics.cancelled = false
       next.metrics.reason = undefined
+      next.pendingTurn.phase = "idle"
+      next.pendingTurn.clientTurnId = null
+      next.pendingTurn.startedAtMs = null
+      next.pendingTurn.elapsedMs = 0
+      if (event.text?.trim()) {
+        next.transcript = [
+          ...next.transcript.slice(-TRANSCRIPT_LIMIT + 1),
+          { role: "user" as const, text: event.text, turnId: event.turn_id ?? undefined },
+        ]
+      }
       next.turnPhase = deriveTurnPhase(next)
       return next
     case "route.selected":
       next.route.routeName = event.route_name
       next.route.provider = event.provider
       next.route.model = event.model
+      if (next.pendingTurn.phase !== "idle") {
+        next.pendingTurn.phase = "idle"
+        next.pendingTurn.clientTurnId = null
+        next.pendingTurn.startedAtMs = null
+        next.pendingTurn.elapsedMs = 0
+      }
       next.turnPhase = deriveTurnPhase(next)
       return next
     case "llm.phase":
       next.llm.phase = event.phase
+      if (next.pendingTurn.phase !== "idle") {
+        next.pendingTurn.phase = "idle"
+        next.pendingTurn.clientTurnId = null
+        next.pendingTurn.startedAtMs = null
+        next.pendingTurn.elapsedMs = 0
+      }
       next.turnPhase = deriveTurnPhase(next)
       return next
     case "llm.reasoning.delta":
       next.llm.thinkingText += event.delta ?? ""
+      if (next.pendingTurn.phase !== "idle") {
+        next.pendingTurn.phase = "idle"
+        next.pendingTurn.clientTurnId = null
+        next.pendingTurn.startedAtMs = null
+        next.pendingTurn.elapsedMs = 0
+      }
       next.turnPhase = deriveTurnPhase(next)
       return next
     case "llm.response.delta":
       next.llm.responseText += event.delta ?? ""
+      if (next.pendingTurn.phase !== "idle") {
+        next.pendingTurn.phase = "idle"
+        next.pendingTurn.clientTurnId = null
+        next.pendingTurn.startedAtMs = null
+        next.pendingTurn.elapsedMs = 0
+      }
       next.turnPhase = deriveTurnPhase(next)
       return next
     case "llm.completed":
       next.llm.responseText = event.text
+      if (next.pendingTurn.phase !== "idle") {
+        next.pendingTurn.phase = "idle"
+        next.pendingTurn.clientTurnId = null
+        next.pendingTurn.startedAtMs = null
+        next.pendingTurn.elapsedMs = 0
+      }
+      if (event.text?.trim()) {
+        next.transcript = [
+          ...next.transcript.slice(-TRANSCRIPT_LIMIT + 1),
+          { role: "assistant" as const, text: event.text, turnId: event.turn_id ?? undefined },
+        ]
+      }
       next.turnPhase = deriveTurnPhase(next)
       return next
     case "llm.error":
       next.llm.phase = "done"
+      next.llm.thinkingText = ""
+      next.llm.responseText = ""
       if (next.sessionStatus === "thinking" || next.sessionStatus === "speaking") {
         next.sessionStatus = "listening"
       }
       next.tts.status = "idle"
+      next.tts.currentSpokenSegment = null
+      next.tts.currentSpokenGenerationId = null
+      next.tts.currentSpokenUpdatedAt = event.timestamp
+      if (next.pendingTurn.phase !== "idle") {
+        next.pendingTurn.phase = "idle"
+        next.pendingTurn.clientTurnId = null
+        next.pendingTurn.startedAtMs = null
+        next.pendingTurn.elapsedMs = 0
+      }
       next.turnPhase = deriveTurnPhase(next)
       return next
-    case "error": {
-      const timeoutKind =
-        event.details && typeof event.details === "object"
-          ? (event.details as { timeout_kind?: unknown }).timeout_kind
-          : undefined
-      if (timeoutKind === "stt_final_timeout") {
-        next.sessionStatus = "listening"
-        next.turnPhase = deriveTurnPhase(next)
-        return next
-      }
-      next.sessionStatus = "failed"
-      next.turnPhase = "idle"
-      return next
-    }
     case "tts.chunk":
       next.tts.status = "playing"
+      next.tts.currentSpokenSegment = event.text_segment ?? next.tts.currentSpokenSegment ?? null
+      next.tts.currentSpokenGenerationId = event.generation_id ?? null
+      next.tts.currentSpokenUpdatedAt = event.timestamp
+      if (next.pendingTurn.phase !== "idle") {
+        next.pendingTurn.phase = "idle"
+        next.pendingTurn.clientTurnId = null
+        next.pendingTurn.startedAtMs = null
+        next.pendingTurn.elapsedMs = 0
+      }
       next.turnPhase = deriveTurnPhase(next)
       return next
     case "tts.completed":
       next.tts.status = "complete"
       next.tts.durationMs = event.duration_ms
+      next.tts.currentSpokenSegment = null
+      next.tts.currentSpokenGenerationId = null
+      next.tts.currentSpokenUpdatedAt = event.timestamp
+      if (next.pendingTurn.phase !== "idle") {
+        next.pendingTurn.phase = "idle"
+        next.pendingTurn.clientTurnId = null
+        next.pendingTurn.startedAtMs = null
+        next.pendingTurn.elapsedMs = 0
+      }
       next.turnPhase = deriveTurnPhase(next)
       return next
     case "conversation.interrupted":
       next.queue.pendingTurns = 0
+      next.pendingTurn.phase = "idle"
+      next.pendingTurn.clientTurnId = null
+      next.pendingTurn.startedAtMs = null
+      next.pendingTurn.elapsedMs = 0
+      next.tts.currentSpokenSegment = null
+      next.tts.currentSpokenGenerationId = null
+      next.tts.currentSpokenUpdatedAt = event.timestamp
       next.turnPhase = "idle"
       return next
     case "turn.queued":
@@ -219,14 +362,81 @@ export function reduceVoiceSessionEvent(
       if (!event.cancelled && next.queue.pendingTurns > 0) {
         next.queue.pendingTurns = Math.max(0, next.queue.pendingTurns - 1)
       }
+      next.pendingTurn.phase = "idle"
+      next.pendingTurn.clientTurnId = null
+      next.pendingTurn.startedAtMs = null
+      next.pendingTurn.elapsedMs = 0
       return next
     case "session.closed":
       next.sessionStatus = "closed"
       next.turnPhase = "idle"
       return next
+    case "error": {
+      const timeoutKind =
+        event.details && typeof event.details === "object"
+          ? (event.details as { timeout_kind?: unknown }).timeout_kind
+          : undefined
+      if (timeoutKind === "stt_final_timeout") {
+        next.sessionStatus = "listening"
+        next.pendingTurn.phase = "idle"
+        next.pendingTurn.clientTurnId = null
+        next.pendingTurn.startedAtMs = null
+        next.pendingTurn.elapsedMs = 0
+        next.turnPhase = deriveTurnPhase(next)
+        return next
+      }
+      next.llm.phase = "done"
+      next.llm.thinkingText = ""
+      next.llm.responseText = ""
+      next.tts.status = "idle"
+      next.tts.currentSpokenSegment = null
+      next.tts.currentSpokenGenerationId = null
+      next.tts.currentSpokenUpdatedAt = event.timestamp
+      next.sessionStatus = "failed"
+      next.pendingTurn.phase = "idle"
+      next.pendingTurn.clientTurnId = null
+      next.pendingTurn.startedAtMs = null
+      next.pendingTurn.elapsedMs = 0
+      next.turnPhase = "idle"
+      return next
+    }
     default:
       return next
   }
+}
+
+export function reduceVoiceSessionOutboundMessage(
+  state: VoiceSessionState,
+  message: ClientMessage,
+  timestampMs: number,
+): VoiceSessionState {
+  const next: VoiceSessionState = {
+    ...state,
+    pendingTurn: { ...state.pendingTurn },
+  }
+
+  if (message.type !== "audio.commit" && message.type !== "user_turn.commit") {
+    return next
+  }
+
+  const clientTurnId =
+    typeof message.client_turn_id === "string" && message.client_turn_id.trim().length > 0
+      ? message.client_turn_id
+      : null
+
+  if (
+    next.pendingTurn.phase !== "idle"
+    && typeof next.pendingTurn.startedAtMs === "number"
+    && timestampMs - next.pendingTurn.startedAtMs < PENDING_TURN_TIMEOUT_MS
+  ) {
+    return next
+  }
+
+  next.pendingTurn.phase = "commit_sent"
+  next.pendingTurn.clientTurnId = clientTurnId
+  next.pendingTurn.startedAtMs = timestampMs
+  next.pendingTurn.elapsedMs = 0
+  return next
 }
 
 function deriveTurnPhase(state: VoiceSessionState): TurnPhase {

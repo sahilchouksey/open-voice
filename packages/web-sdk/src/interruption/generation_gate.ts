@@ -41,14 +41,18 @@ export class GenerationEventGate {
   }
 
   shouldAccept(event: ConversationEvent): boolean {
+    const generationId = event.generation_id ?? null
     if (
       this.suppressTtsUntilNextGenerationStart
       && (event.type === "tts.chunk" || event.type === "tts.completed")
     ) {
-      return false
+      // Keep blocking stale generation-scoped TTS, but allow non-generation
+      // TTS events (for example agent.say fallback speech).
+      if (generationId) {
+        return false
+      }
     }
 
-    const generationId = event.generation_id ?? null
     if (!generationId) return true
 
     if (this.rejectedGenerationIds.has(generationId)) {
@@ -83,14 +87,18 @@ export class GenerationEventGate {
       return
     }
 
+    const generationId = event.generation_id ?? null
+
     if (
       this.suppressTtsUntilNextGenerationStart
-      && RESUME_FROM_TTS_SUPPRESSION_EVENT_TYPES.has(event.type)
+      && (
+        RESUME_FROM_TTS_SUPPRESSION_EVENT_TYPES.has(event.type)
+        || ((event.type === "tts.chunk" || event.type === "tts.completed") && !generationId)
+      )
     ) {
       this.suppressTtsUntilNextGenerationStart = false
     }
 
-    const generationId = event.generation_id ?? null
     if (!generationId) {
       return
     }

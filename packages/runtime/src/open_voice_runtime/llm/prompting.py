@@ -78,6 +78,18 @@ _URL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
 def strip_tts_symbols(text: str) -> str:
     """Remove markdown/symbols from LLM output that would be spoken aloud incorrectly."""
+    # Normalize common Unicode punctuation/spaces that can break TTS prosody.
+    text = (
+        text.replace("\u202f", " ")
+        .replace("\u00a0", " ")
+        .replace("\u2011", "-")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2018", "'")
+        .replace("\u2019", "'")
+        .replace("\u201c", '"')
+        .replace("\u201d", '"')
+    )
     for pattern, replacement in _SYMBOL_PATTERNS:
         text = pattern.sub(replacement, text)
     for pattern, replacement in _URL_PATTERNS:
@@ -142,6 +154,8 @@ OPEN_VOICE_BASE_SYSTEM_PROMPT = (
     "- Use tools when available to improve accuracy instead of guessing\n"
     "- For current events or other time-sensitive topics, search the web before answering\n"
     "- Do not rely on memory alone for live facts like news, elections, markets, sports, or weather\n"
+    "- If the user asks you to search, look up, verify, or check online, you MUST call websearch before answering\n"
+    "- For poem or quote requests, do not invent or paraphrase from memory; verify exact wording with websearch first\n"
     "- Do not mention the tool name or technical details to the user\n"
     "- Present tool results as natural conversation not data\n"
     "- Never say according to my search or based on the search results - just state the facts directly\n\n"
@@ -176,6 +190,7 @@ def _tool_prompt_section(config: LlmSessionConfig) -> str:
             label += " (external service)"
         description = tool.description or "No description provided."
         lines.append(f"- {label}: {description}")
+    lines.append("\nImportant: call tools by their exact listed names only.")
     lines.append(
         "\nWhen using tools, present results conversationally without mentioning the tool name or technical parameters."
     )

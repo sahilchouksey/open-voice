@@ -9,7 +9,7 @@ BACKEND_VENV="${SCRIPT_DIR}/backend/.venv"
 BACKEND_PYTHON="${BACKEND_VENV}/bin/python"
 DEMO_ENV="${SCRIPT_DIR}/.env"
 DEMO_ENV_LOCAL="${SCRIPT_DIR}/.env.local"
-DEFAULT_ROUTE_TARGETS='[{"llm_engine_id":"opencode","provider":"doai","model":"openai-gpt-oss-120b","profile_id":"trivial_route"},{"llm_engine_id":"opencode","provider":"doai","model":"openai-gpt-oss-120b","profile_id":"simple_route"},{"llm_engine_id":"opencode","provider":"doai","model":"openai-gpt-oss-120b","profile_id":"moderate_route"},{"llm_engine_id":"opencode","provider":"doai","model":"openai-gpt-oss-120b","profile_id":"complex_route"},{"llm_engine_id":"opencode","provider":"doai","model":"openai-gpt-oss-120b","profile_id":"expert_route"}]'
+DEFAULT_ROUTE_TARGETS='[{"llm_engine_id":"opencode","provider":"digitalocean-oss","model":"openai-gpt-oss-120b","profile_id":"trivial_route"},{"llm_engine_id":"opencode","provider":"digitalocean-oss","model":"openai-gpt-oss-120b","profile_id":"simple_route"},{"llm_engine_id":"opencode","provider":"digitalocean-oss","model":"openai-gpt-oss-120b","profile_id":"moderate_route"},{"llm_engine_id":"opencode","provider":"digitalocean-oss","model":"openai-gpt-oss-120b","profile_id":"complex_route"},{"llm_engine_id":"opencode","provider":"digitalocean-oss","model":"openai-gpt-oss-120b","profile_id":"expert_route"}]'
 
 load_env_file() {
   local env_file="$1"

@@ -20,8 +20,10 @@ export interface RuntimeSessionConfig {
   turnQueue?: TurnQueueConfig
   interruption?: InterruptionConfig
   endpointing?: EndPointingConfig
+  endPointing?: EndPointingConfig
   turnDetection?: Record<string, unknown>
   retry?: RetryConfig
+  client?: ClientBehaviorConfig
   raw?: Record<string, unknown>
 }
 
@@ -44,12 +46,34 @@ export interface InterruptionConfig {
   minDuration?: number // Minimum speech duration in seconds
   minWords?: number // Minimum words before interrupt (0 to disable)
   cooldownMs?: number // Cooldown between interrupts in milliseconds
+  autoInterrupt?: AutoInterruptConfig
+}
+
+export interface AutoInterruptConfig {
+  enabled?: boolean
+  vadThreshold?: number // VAD probability threshold to trigger interrupt
+  minDurationMs?: number // Minimum speech duration before interrupt
 }
 
 export interface EndPointingConfig {
   mode?: "fixed" | "dynamic"
   minDelay?: number // Minimum time after speech to declare turn complete (seconds)
   maxDelay?: number // Maximum time to wait before terminating turn (seconds)
+}
+
+export interface ClientBehaviorConfig {
+  echoFiltering?: EchoFilterConfig
+  autoCommit?: AutoCommitConfig
+}
+
+export interface EchoFilterConfig {
+  enabled?: boolean
+}
+
+export interface AutoCommitConfig {
+  enabled?: boolean
+  vadEndOfSpeechDelayMs?: number // Delay after VAD end-of-speech before committing
+  minSpeechDurationMs?: number // Minimum speech duration to trigger auto-commit
 }
 
 export interface LlmToolConfig {
@@ -112,6 +136,9 @@ export function toRuntimeConfigPayload(
     if (config.retry.afterMs !== undefined) retryPayload.after_ms = config.retry.afterMs
     payload.retry = retryPayload
   }
+  if (config.client !== undefined) {
+    payload.client = toClientBehaviorPayload(config.client)
+  }
   if (config.raw !== undefined) {
     Object.assign(payload, config.raw)
   }
@@ -125,6 +152,28 @@ function toInterruptionPayload(config: InterruptionConfig): Record<string, unkno
   if (config.minDuration !== undefined) payload.min_duration = config.minDuration
   if (config.minWords !== undefined) payload.min_words = config.minWords
   if (config.cooldownMs !== undefined) payload.cooldown_ms = config.cooldownMs
+  if (config.autoInterrupt !== undefined) {
+    const autoPayload: Record<string, unknown> = {}
+    if (config.autoInterrupt.enabled !== undefined) autoPayload.enabled = config.autoInterrupt.enabled
+    if (config.autoInterrupt.vadThreshold !== undefined) autoPayload.vad_threshold = config.autoInterrupt.vadThreshold
+    if (config.autoInterrupt.minDurationMs !== undefined) autoPayload.min_duration_ms = config.autoInterrupt.minDurationMs
+    payload.auto_interrupt = autoPayload
+  }
+  return payload
+}
+
+function toClientBehaviorPayload(config: ClientBehaviorConfig): Record<string, unknown> {
+  const payload: Record<string, unknown> = {}
+  if (config.echoFiltering !== undefined) {
+    payload.echo_filtering = { enabled: config.echoFiltering.enabled ?? true }
+  }
+  if (config.autoCommit !== undefined) {
+    const commitPayload: Record<string, unknown> = {}
+    if (config.autoCommit.enabled !== undefined) commitPayload.enabled = config.autoCommit.enabled
+    if (config.autoCommit.vadEndOfSpeechDelayMs !== undefined) commitPayload.vad_eos_delay_ms = config.autoCommit.vadEndOfSpeechDelayMs
+    if (config.autoCommit.minSpeechDurationMs !== undefined) commitPayload.min_speech_duration_ms = config.autoCommit.minSpeechDurationMs
+    payload.auto_commit = commitPayload
+  }
   return payload
 }
 

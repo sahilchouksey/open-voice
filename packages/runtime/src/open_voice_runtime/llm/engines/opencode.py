@@ -30,6 +30,12 @@ def default_opencode_tools() -> tuple[LlmToolDefinition, ...]:
         LlmToolDefinition(
             name="websearch",
             description="Search the web for current information and relevant sources.",
+            kind=LlmToolKind.FUNCTION,
+        ),
+        LlmToolDefinition(
+            name="webfetch",
+            description="Fetch and read content from a specific web URL.",
+            kind=LlmToolKind.FUNCTION,
         ),
     )
 
@@ -286,14 +292,13 @@ def _model(request: LlmRequest) -> OpencodeModelRef:
 def _tools(value: tuple[LlmToolDefinition, ...]) -> tuple[LlmToolDefinition, ...]:
     merged = {tool.name: tool for tool in default_opencode_tools()}
     for tool in value:
-        if tool.name in merged:
-            merged[tool.name] = tool
+        merged[tool.name] = tool
     return tuple(merged.values())
 
 
 def _permissions(tools: tuple[LlmToolDefinition, ...]) -> list[dict[str, str]]:
-    # Default-deny every tool capability, then allow only explicitly configured
-    # tools for this session.
+    # Enforce an allowlist at session level so only explicitly configured tools
+    # can execute. This prevents fallback to unrelated external tools.
     permissions: list[dict[str, str]] = [
         {
             "permission": "*",
@@ -323,7 +328,16 @@ def _prompt(request: LlmRequest, tools: tuple[LlmToolDefinition, ...]) -> str:
         additional_instructions=instructions if isinstance(instructions, str) else None,
         tools=tools,
     )
-    return build_open_voice_system_prompt(config)
+    prompt = build_open_voice_system_prompt(config)
+    allowed = ", ".join(tool.name for tool in tools) if tools else "none"
+    hard_tool_guard = (
+        "\n\nTool Execution Constraints:\n"
+        f"- You may call only these tools: {allowed}.\n"
+        "- Do not request or reference any other tool names.\n"
+        "- If a requested capability is unavailable, answer without tool calls instead of switching tools.\n"
+        "- Never output raw JSON or pseudo tool-call text in user-facing responses."
+    )
+    return prompt + hard_tool_guard
 
 
 def _mode_from_request(request: LlmRequest) -> str | None:
@@ -513,7 +527,12 @@ def _text_update(
     ]
 
 
-def _tool_update(part: dict[str, Any], tools: dict[str, LlmToolKind]) -> LlmEvent:
+def _tool_update(
+    part: dict[str, Any],
+    tools: dict[str, LlmToolKind],
+    *,
+    resolved_name: str | None = None,
+) -> LlmEvent:
     state = part.get("state")
     data = state if isinstance(state, dict) else {}
     meta: dict[str, Any] = {}
@@ -521,7 +540,7 @@ def _tool_update(part: dict[str, Any], tools: dict[str, LlmToolKind]) -> LlmEven
         meta.update(data["metadata"])
     if isinstance(part.get("metadata"), dict):
         meta.update(part["metadata"])
-    name = _tool_name(part) or "unknown"
+    name = resolved_name or _tool_name(part) or "unknown"
     status = _as_str(data.get("status"))
     call_id = _as_str(part.get("callID")) or _as_str(data.get("callID")) or _as_str(part.get("id"))
     return LlmEvent(
@@ -556,15 +575,25 @@ def _tool_name(part: dict[str, Any]) -> str | None:
     return None
 
 
+def _resolved_tool_name(part: dict[str, Any], tools: dict[str, LlmToolKind]) -> str | None:
+    _ = tools
+    explicit = _tool_name(part)
+    if explicit is not None:
+        return explicit
+
+    return None
+
+
 def _tool_update_if_present(
     part: dict[str, Any],
     tools: dict[str, LlmToolKind],
     *,
     fallback_status: str,
 ) -> LlmEvent | None:
-    if _tool_name(part) is None:
+    name = _resolved_tool_name(part, tools)
+    if name is None:
         return None
-    event = _tool_update(part, tools)
+    event = _tool_update(part, tools, resolved_name=name)
     if event.metadata.get("status") is None:
         event.metadata["status"] = fallback_status
     return event

@@ -3,6 +3,8 @@ import type { RuntimeSessionConfig } from "./config"
 import { toRuntimeConfigPayload } from "./config"
 import type { AudioOutputAdapter } from "./interruption/audio_output"
 import { SessionAudioController as SessionAudioControllerImpl } from "./interruption/audio_output"
+import { EventSequencer } from "./orchestration/event_sequencer"
+import { GenerationOwner } from "./orchestration/generation_owner"
 import type {
   AgentGenerateReplyMessage,
   AgentSayMessage,
@@ -13,36 +15,74 @@ import type {
 } from "./protocol"
 import {
   createVoiceSessionState,
-  reduceVoiceSessionEvent,
   type VoiceSessionState,
 } from "./state"
+import {
+  createVoiceSessionStore,
+  toClockTickAction,
+  toOutboundMessageAction,
+  toInboundEventAction,
+  type VoiceSessionStore,
+} from "./store/session_store"
 import { RealtimeConversationSocket } from "./transport/websocket"
+
+export interface WebVoiceSessionOptions {
+  audioOutput?: AudioOutputAdapter
+  debug?: boolean
+}
+
+const EVENT_DEBUG_THRESHOLD_MS = 50
+const EVENT_DEBUG_PREFIX = "[OV-DEBUG] WebVoiceSession"
 
 export class WebVoiceSession {
   readonly sessionId: string
   readonly socket: RealtimeConversationSocket
   input?: AudioInputAdapter
   state: VoiceSessionState
+  readonly store: VoiceSessionStore
   private readonly stateListeners = new Set<(state: VoiceSessionState) => void>()
   private readonly audioController?: SessionAudioControllerImpl
+  private readonly eventSequencer: EventSequencer
+  private readonly generationOwner = new GenerationOwner()
+  private pendingTurnClock: number | null = null
+  private readonly debug: boolean
 
   constructor(
     sessionId: string,
     socket: RealtimeConversationSocket,
-    opts: { audioOutput?: AudioOutputAdapter } = {},
+    opts: WebVoiceSessionOptions = {},
   ) {
     this.sessionId = sessionId
     this.socket = socket
+    this.debug = opts.debug ?? false
     this.state = createVoiceSessionState(sessionId)
+    this.store = createVoiceSessionStore(sessionId)
+    this.store.subscribe((nextState) => {
+      this.state = nextState
+      this.ensurePendingTurnClock(nextState)
+      for (const listener of this.stateListeners) listener(this.state)
+    })
     if (opts.audioOutput) {
       this.audioController = new SessionAudioControllerImpl(opts.audioOutput)
     }
+    this.eventSequencer = new EventSequencer({ debug: this.debug })
     this.socket.onEvent((event) => {
-      if (this.audioController) {
-        void this.audioController.onEvent(event)
-      }
-      this.state = reduceVoiceSessionEvent(this.state, event)
-      for (const listener of this.stateListeners) listener(this.state)
+      const receiveTime = this.debug ? performance.now() : 0
+      this.eventSequencer.push(async () => {
+        if (this.debug) {
+          const processTime = performance.now() - receiveTime
+          if (processTime > EVENT_DEBUG_THRESHOLD_MS) {
+            console.warn(`${EVENT_DEBUG_PREFIX}: slow event ${event.type} ${processTime.toFixed(2)}ms`)
+          }
+        }
+        const ownership = this.generationOwner.decide(event)
+        if (ownership.acceptForAudio && this.audioController) {
+          await this.audioController.onEvent(event)
+        }
+        if (ownership.acceptForState) {
+          this.store.dispatch(toInboundEventAction(event))
+        }
+      })
     })
   }
 
@@ -62,11 +102,12 @@ export class WebVoiceSession {
   }
 
   send(message: ClientMessage): void {
+    this.store.dispatch(toOutboundMessageAction(message))
     this.socket.send(message)
   }
 
   sendAudio(chunk: InputAudioChunk): void {
-    this.socket.send({
+    this.send({
       type: "audio.append",
       session_id: this.sessionId,
       chunk: {
@@ -83,7 +124,7 @@ export class WebVoiceSession {
   }
 
   commit(sequence?: number, clientTurnId?: string): void {
-    this.socket.send({
+    this.send({
       type: "audio.commit",
       session_id: this.sessionId,
       sequence,
@@ -98,7 +139,7 @@ export class WebVoiceSession {
       sequence,
       client_turn_id: clientTurnId,
     }
-    this.socket.send(message)
+    this.send(message)
   }
 
   say(
@@ -106,14 +147,14 @@ export class WebVoiceSession {
     opts: { interruptCurrent?: boolean; reason?: string } = {},
   ): void {
     if (opts.interruptCurrent) {
-      this.interrupt(opts.reason ?? "say")
+      void this.interrupt(opts.reason ?? "say")
     }
     const message: AgentSayMessage = {
       type: "agent.say",
       session_id: this.sessionId,
       text,
     }
-    this.socket.send(message)
+    this.send(message)
   }
 
   generateReply(opts: {
@@ -125,7 +166,7 @@ export class WebVoiceSession {
   }): void {
     const shouldInterruptCurrent = opts.interruptCurrent ?? true
     if (shouldInterruptCurrent) {
-      this.interrupt(opts.reason ?? "generate_reply")
+      void this.interrupt(opts.reason ?? "generate_reply")
     }
     const message: AgentGenerateReplyMessage = {
       type: "agent.generate_reply",
@@ -136,24 +177,25 @@ export class WebVoiceSession {
     if (opts.allowInterruptions !== undefined) {
       message.allow_interruptions = opts.allowInterruptions
     }
-    this.socket.send(message)
+    this.send(message)
   }
 
-  interrupt(reason?: string): void {
-    this.socket.send({
+  async interrupt(reason?: string): Promise<void> {
+    this.generationOwner.rejectActiveGeneration()
+    this.send({
       type: "conversation.interrupt",
       session_id: this.sessionId,
       reason,
     })
     if (this.audioController) {
-      void this.audioController.interrupt(reason)
+      await this.audioController.interrupt(reason)
     }
   }
 
   updateConfig(config: RuntimeSessionConfig): void {
     const payload = toRuntimeConfigPayload(config)
     if (!payload) return
-    this.socket.send({
+    this.send({
       type: "config.update",
       session_id: this.sessionId,
       config: payload,
@@ -170,9 +212,33 @@ export class WebVoiceSession {
       await this.audioController.interrupt("close")
       this.audioController.reset()
     }
+    this.clearPendingTurnClock()
+    this.eventSequencer.reset()
+    this.generationOwner.reset()
     const msg: SessionCloseMessage = { type: "session.close", session_id: this.sessionId }
-    this.socket.send(msg)
+    this.send(msg)
     this.socket.close()
+  }
+
+  private ensurePendingTurnClock(state: VoiceSessionState): void {
+    if (state.pendingTurn.phase === "idle") {
+      this.clearPendingTurnClock()
+      return
+    }
+    if (this.pendingTurnClock !== null) {
+      return
+    }
+    this.pendingTurnClock = window.setInterval(() => {
+      this.store.dispatch(toClockTickAction())
+    }, 300)
+  }
+
+  private clearPendingTurnClock(): void {
+    if (this.pendingTurnClock === null) {
+      return
+    }
+    window.clearInterval(this.pendingTurnClock)
+    this.pendingTurnClock = null
   }
 }
 

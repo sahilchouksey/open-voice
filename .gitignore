@@ -12,3 +12,6 @@ node_modules/
 dist/
 coverage/
 .DS_Store
+.opencode/opencode.json
+.opencode/opencode.json.backup
+demos/.env

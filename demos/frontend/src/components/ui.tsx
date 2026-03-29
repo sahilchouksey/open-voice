@@ -27,8 +27,8 @@ export function Select(props: SelectHTMLAttributes<HTMLSelectElement>) {
 }
 
 export function Button(props: ButtonHTMLAttributes<HTMLButtonElement>) {
-  const { className = "", ...rest } = props
-  return <button className={`ui-button ${className}`.trim()} {...rest} />
+  const { className = "", type, ...rest } = props
+  return <button className={`ui-button ${className}`.trim()} type={type ?? "button"} {...rest} />
 }
 
 export function TabsList(props: HTMLAttributes<HTMLElement>) {

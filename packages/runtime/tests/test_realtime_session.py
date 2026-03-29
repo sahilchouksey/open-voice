@@ -17,6 +17,7 @@ from open_voice_runtime.llm.contracts import (
     LlmPhase,
     LlmRequest,
     LlmResponse,
+    LlmToolKind,
     TokenUsage,
 )
 from open_voice_runtime.llm.engine import BaseLlmEngine
@@ -3127,6 +3128,10 @@ def test_commit_emits_tool_update_events() -> None:
     asyncio.run(_test_commit_emits_tool_update_events())
 
 
+def test_commit_uses_builtin_websearch_tool_config_and_emits_function_tool_update() -> None:
+    asyncio.run(_test_commit_uses_builtin_websearch_tool_config_and_emits_function_tool_update())
+
+
 def test_send_now_barge_in_preserves_interrupting_chunk_text() -> None:
     asyncio.run(_test_send_now_barge_in_preserves_interrupting_chunk_text())
 
@@ -3707,7 +3712,7 @@ async def _test_commit_emits_tool_update_events() -> None:
                     kind=LlmEventKind.TOOL_UPDATE,
                     call_id="call_1",
                     tool_name="websearch",
-                    tool_input={"query": "Sahil Chokse"},
+                    tool_input={"query": "Sahil Chouksey"},
                     tool_metadata={"source": "opencode"},
                     tool_output={"hits": 3},
                     metadata={"status": "running", "is_mcp": True},
@@ -3750,6 +3755,106 @@ async def _test_commit_emits_tool_update_events() -> None:
     assert tool_event.tool_name == "websearch"
     assert tool_event.status == "running"
     assert tool_event.is_mcp is True
+
+
+async def _test_commit_uses_builtin_websearch_tool_config_and_emits_function_tool_update() -> None:
+    session_manager = InMemorySessionManager()
+    stt_registry = SttEngineRegistry()
+    stt_registry.register(
+        FakeSttEngine(
+            [
+                [],
+                [
+                    SttEvent(
+                        kind=SttEventKind.FINAL, text="latest update on us and iran", sequence=1
+                    )
+                ],
+            ]
+        ),
+        default=True,
+    )
+    router_registry = RouterEngineRegistry()
+    router_registry.register(FakeRouterEngine("moderate_route"), default=True)
+
+    llm_registry = LlmEngineRegistry()
+    llm_engine = FakeLlmEngine(
+        [
+            LlmEvent(kind=LlmEventKind.PHASE, phase=LlmPhase.THINKING),
+            LlmEvent(
+                kind=LlmEventKind.TOOL_UPDATE,
+                call_id="builtin_1",
+                tool_name="websearch",
+                tool_input={"query": "latest update on us and iran"},
+                metadata={"status": "running", "is_mcp": False},
+            ),
+            LlmEvent(
+                kind=LlmEventKind.TOOL_UPDATE,
+                call_id="builtin_1",
+                tool_name="websearch",
+                tool_output={"results": [{"title": "headline"}]},
+                metadata={"status": "completed", "is_mcp": False},
+            ),
+            LlmEvent(
+                kind=LlmEventKind.RESPONSE_DELTA,
+                text="Here is the latest update.",
+                lane=LlmOutputLane.SPEECH,
+                part_id="part-1",
+            ),
+            LlmEvent(
+                kind=LlmEventKind.COMPLETED,
+                text="Here is the latest update.",
+                finish_reason="stop",
+            ),
+        ]
+    )
+    llm_registry.register(llm_engine, default=True)
+
+    tts_registry = TtsEngineRegistry()
+    tts_registry.register(FakeTtsEngine(), default=True)
+
+    session = RealtimeConversationSession(
+        session_manager,
+        config=RuntimeConfig.from_mapping(
+            {
+                "llm": {
+                    "tools": [
+                        {
+                            "name": "websearch",
+                            "description": "Builtin OpenCode web search",
+                            "kind": "function",
+                        }
+                    ],
+                    "enable_fast_ack": False,
+                }
+            }
+        ),
+        stt_service=SttService(stt_registry),
+        router_service=RouterService(router_registry),
+        llm_service=LlmService(llm_registry),
+        tts_service=TtsService(tts_registry),
+    )
+
+    start = await session.apply_message(SessionStartMessage())
+    session_id = start[0].session_id
+
+    await session.apply_message(_audio_append_message(session_id, sequence=0))
+    commit_events = await session.apply_message(AudioCommitMessage(session_id=session_id))
+
+    request = llm_engine.requests[0]
+    assert len(request.tools) == 1
+    assert request.tools[0].name == "websearch"
+    assert request.tools[0].kind is LlmToolKind.FUNCTION
+
+    tool_updates = [event for event in commit_events if event.type == "llm.tool.update"]
+    assert len(tool_updates) == 2
+    assert tool_updates[0].tool_name == "websearch"
+    assert tool_updates[0].status == "running"
+    assert tool_updates[0].is_mcp is False
+    assert tool_updates[0].tool_input == {"query": "latest update on us and iran"}
+    assert tool_updates[1].tool_name == "websearch"
+    assert tool_updates[1].status == "completed"
+    assert tool_updates[1].is_mcp is False
+    assert tool_updates[1].tool_output == {"results": [{"title": "headline"}]}
 
 
 def test_auto_commit_accepts_vad_inference_silence_without_explicit_end() -> None:

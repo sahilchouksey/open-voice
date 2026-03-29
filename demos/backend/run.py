@@ -43,6 +43,16 @@ def _load_env_file(path: Path) -> None:
 _load_env_file(ROOT / "demos" / ".env")
 _load_env_file(ROOT / "demos" / ".env.local")
 
+# Ensure the runtime always resolves project-local .opencode config.
+os.environ.setdefault("OPEN_VOICE_OPENCODE_DIRECTORY", str(ROOT))
+
+# Ensure built-in websearch availability for voice mode in the demo backend.
+os.environ.setdefault("OPEN_VOICE_OPENCODE_ENABLE_EXA", "1")
+
+# Use a demo-dedicated local OpenCode port so stale global daemons on :4096
+# do not get reused with outdated flags/credentials.
+os.environ.setdefault("OPENCODE_BASE_URL", "http://127.0.0.1:4098")
+
 
 # ── Register Parakeet STT Engine ──────────────────────────────────────────────
 BACKEND_DIR = Path(__file__).resolve().parent
