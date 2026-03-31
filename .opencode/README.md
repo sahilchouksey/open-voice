@@ -1,162 +1,177 @@
-# Open Voice + GitHub Copilot Proxy Configuration
+# Open Voice OpenCode Configuration
 
-This configuration routes Open Voice traffic through the GitHub Copilot Proxy running locally at `localhost:3000`, utilizing multiple accounts for automatic load balancing and rate limit handling.
+This directory contains OpenCode agent configurations for the Open Voice runtime.
 
-## 🏗️ Architecture
+## Files
 
-```
-Open Voice Frontend → Open Voice Backend → OpenCode → GitHub Copilot Proxy (localhost:3000) → GitHub Copilot API
-                                           ↑
-                                    Multi-Account Rotation
-                                    (5 accounts, automatic)
-```
+| File | Description |
+|------|-------------|
+| `opencode.json` | Active configuration (gitignored - contains secrets) |
+| `opencode.example.json` | Template with example providers (safe to commit) |
+| `voice.md` | Voice agent prompt and rules |
+| `build.md` | Build agent prompt and rules |
+| `modes/voice.md` | Voice mode permissions |
 
-## 📁 Configuration Files
+## Quick Start
 
-### 1. `.opencode/opencode.json` (Provider Config)
-Defines the `copilot-proxy` provider with free models only:
-- **gpt-4.1** - Trivial tasks (greetings, confirmations)
-- **gpt-4o** - Simple tasks (basic questions)
-- **gpt-4o-mini** - Moderate tasks (standard operations)
-- **claude-sonnet-4** - Complex tasks (reasoning, analysis)
-- **gpt-5-mini** - Expert tasks (code generation, expert queries)
+### 1. Copy the example file
 
-### 2. `demos/.env.local` (Environment Config)
-Routes different complexity tiers to different models:
-```
-trivial_route  → gpt-4.1
-simple_route   → gpt-4o
-moderate_route → gpt-4o-mini
-complex_route  → claude-sonnet-4
-expert_route   → gpt-5-mini
-```
-
-## 🚀 Quick Start
-
-### Prerequisites
-1. GitHub Copilot Proxy running on `localhost:3000`
-2. At least 1 active account in the proxy
-
-### Start the Proxy
 ```bash
-cd ~/Documents/fun/github-copilot-proxy
-bun run dev
+cp opencode.example.json opencode.json
 ```
 
-### Start Open Voice
+### 2. Edit opencode.json
+
+Edit `opencode.json` to configure your providers:
+
+```json
+{
+  "provider": {
+    "ollama-local": {
+      "options": {
+        "baseURL": "http://localhost:11434/v1",
+        "apiKey": "ollama"
+      }
+    }
+  }
+}
+```
+
+## Using Ollama
+
+### Option A: Local Ollama
+
 ```bash
-cd ~/Documents/fun/open-voice/demos
-bun run dev
+# Start Ollama
+ollama serve
+
+# Pull a model
+ollama pull llama3.2
 ```
 
-Or separately:
+Then configure in `opencode.json`:
+
+```json
+{
+  "provider": {
+    "ollama-local": {
+      "options": {
+        "baseURL": "http://localhost:11434/v1",
+        "apiKey": "ollama"
+      },
+      "models": {
+        "llama3.2": {
+          "name": "Llama 3.2",
+          "modalities": {
+            "input": ["text"],
+            "output": ["text"]
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### Option B: Remote Ollama
+
+If Ollama is running on another machine:
+
+```json
+{
+  "provider": {
+    "ollama-remote": {
+      "options": {
+        "baseURL": "http://192.168.1.100:11434/v1",
+        "apiKey": "ollama"
+      }
+    }
+  }
+}
+```
+
+## Changing the Active Route
+
+To use a different provider/model, edit these files:
+
+### 1. Runtime Router Policy
+
+**File:** `packages/runtime/src/open_voice_runtime/router/policy.py`
+
+Look for `default_route_targets()` function:
+
+```python
+def default_route_targets():
+    return RouteTarget(
+        llm_engine_id="opencode",
+        provider="ollama-local",    # ← Change this to your provider ID
+        model="llama3.2",           # ← Change this to your model ID
+        profile_id="moderate_route",
+    )
+```
+
+### 2. Or via Environment Variable
+
+Set `OPEN_VOICE_ROUTE_TARGETS` in your environment or `.env`:
+
 ```bash
-# Terminal 1: Backend
-python3 demos/backend/run.py
-
-# Terminal 2: Frontend
-cd demos/frontend && bun run dev
+# Format: JSON array of RouteTarget objects
+export OPEN_VOICE_ROUTE_TARGETS='[{"llm_engine_id":"opencode","provider":"ollama-local","model":"llama3.2","profile_id":"moderate_route"}]'
 ```
 
-## 📊 Multi-Account Benefits
+### 3. Demo Frontend
 
-The proxy automatically:
-- ✅ Rotates requests across accounts
-- ✅ Handles rate limits gracefully
-- ✅ Retries with next account on failure
-- ✅ Tracks quota per account
-- ✅ Shows all accounts in status endpoint
+**File:** `demos/frontend/src/constants/config.ts`
 
-**Current Accounts:**
-- sahilchouksey (1 req)
-- akshadakaleghacc (0 req)
-- khushboovishwakarmaghacc (0 req)
-- khushibenghacc (4 req)
-- **vandanapatelgh (DISABLED)** - Hidden from routing
+Look for route configuration:
 
-## 🔧 Managing Accounts
+```typescript
+export const DEFAULT_ROUTE_PROVIDER = "ollama-local"
+export const DEFAULT_ROUTE_MODEL = "llama3.2"
+```
 
-### Check Status
+### 4. Demo .env
+
+**File:** `demos/.env.example` → copy to `demos/.env`
+
 ```bash
-cd ~/Documents/fun/github-copilot-proxy
-bun run quota          # View quota across all accounts
-bun run auth:list      # List all accounts with status
+# Runtime URL
+VITE_RUNTIME_BASE_URL=http://localhost:7860
+
+# OpenCode Base URL (for local OpenCode server)
+OPENCODE_BASE_URL=http://127.0.0.1:4096
 ```
 
-### Disable/Enable Accounts
-```bash
-# Disable an account (will be ignored)
-bun run auth:disable -- --id account-1770910651825-1
+## Available Providers in Example
 
-# Enable an account (will be used again)
-bun run auth:enable -- --id account-1770910651825-1
-```
+| Provider ID | Description | Base URL |
+|-------------|-------------|----------|
+| `ollama-local` | Ollama running on localhost | http://localhost:11434/v1 |
+| `ollama-remote` | Ollama on remote machine | http://192.168.1.100:11434/v1 |
+| `digitalocean-oss` | DigitalOcean OSS endpoint | https://inference.do-ai.run/v1 |
 
-### Add New Accounts
-```bash
-# Authenticate new GitHub account
-bun run auth:add
+## Supported Models
 
-# Follow prompts to authenticate via device flow
-```
+Check the `models` section in each provider for available options:
 
-## 🎯 Route Tiers
+- `llama3.2` - Meta's Llama 3.2
+- `qwen2.5` - Alibaba's Qwen 2.5
+- `mistral` - Mistral AI
+- `openai-gpt-oss-120b` - DigitalOcean GPT OSS
 
-Open Voice automatically selects routes based on query complexity:
+## Environment Variables
 
-| Tier | Use Case | Model | Max Tokens |
-|------|----------|-------|------------|
-| **Trivial** | Greetings, confirmations | gpt-4.1 | 500 |
-| **Simple** | Basic questions | gpt-4o | 1000 |
-| **Moderate** | Standard tasks | gpt-4o-mini | 2000 |
-| **Complex** | Multi-step reasoning | claude-sonnet-4 | 4000 |
-| **Expert** | Code, analysis | gpt-5-mini | 8000 |
+The runtime uses these OpenCode-related environment variables:
 
-## 💡 Usage Tips
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPENCODE_BASE_URL` | `http://127.0.0.1:4096` | OpenCode server URL |
+| `OPEN_VOICE_OPENCODE_DIRECTORY` | From opencode.json | Working directory |
+| `OPEN_VOICE_OPENCODE_WORKSPACE` | None | Workspace name |
+| `OPEN_VOICE_OPENCODE_ENABLE_EXA` | `True` | Enable Exa search |
 
-1. **Monitor Quota**: Run `bun run quota` regularly to check usage
-2. **Add Accounts**: More accounts = higher rate limits
-3. **Free Models**: All configured models are FREE with unlimited requests
-4. **Disabled Accounts**: Completely invisible to the proxy (not counted in quota)
-5. **Rate Limits**: If you hit 429 errors, wait 1 hour or add more accounts
+## Security Notes
 
-## 🐛 Troubleshooting
-
-### "All accounts are currently unavailable"
-- Rate limits hit: Wait 1 hour or add more accounts
-- Check: `curl http://localhost:3000/status`
-
-### "Proxy not running"
-- Start proxy: `cd ~/Documents/fun/github-copilot-proxy && bun run dev`
-- Check port: `lsof -i :3000`
-
-### Low quota warnings
-- Check quota: `bun run quota`
-- Add accounts: `bun run auth:add`
-- Disable exhausted accounts: `bun run auth:disable -- --id <id>`
-
-## 📈 Monitoring
-
-### Proxy Status
-```bash
-curl http://localhost:3000/status | jq
-```
-
-### Quota Status
-```bash
-curl http://localhost:3000/quota | jq
-```
-
-### Test Proxy
-```bash
-curl -X POST http://localhost:3000/v1/chat/completions \
-  -H "Authorization: Bearer copilot-proxy" \
-  -d '{"model": "gpt-4.1", "messages": [{"role": "user", "content": "Hi"}]}'
-```
-
-## 🔒 Security Notes
-
-- Tokens stored securely in OS keychain
-- API key is "copilot-proxy" (no actual key needed)
-- Proxy handles authentication automatically
-- Disabled accounts remain in storage but are ignored
+- ⚠️ `opencode.json` is **gitignored** - never commit API keys
+- ⚠️ Use `opencode.example.json` as a template
+- API keys in `opencode.json` should be kept secret

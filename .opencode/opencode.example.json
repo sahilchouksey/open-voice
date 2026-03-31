@@ -1,0 +1,83 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "voice",
+  "agent": {
+    "voice": {
+      "description": "Realtime voice-first assistant for conversation and web research",
+      "mode": "primary",
+      "prompt": "{file:agent/voice.md}"
+    },
+    "build": {
+      "description": "Standard build agent for development tasks",
+      "mode": "primary",
+      "prompt": "{file:agent/build.md}"
+    }
+  },
+  "provider": {
+    "ollama-local": {
+      "npm": "@ai-sdk/ollama",
+      "name": "Ollama Local",
+      "options": {
+        "baseURL": "http://localhost:11434/v1",
+        "apiKey": "ollama"
+      },
+      "models": {
+        "llama3.2": {
+          "name": "Llama 3.2",
+          "modalities": {
+            "input": ["text"],
+            "output": ["text"]
+          }
+        },
+        "qwen2.5": {
+          "name": "Qwen 2.5",
+          "modalities": {
+            "input": ["text"],
+            "output": ["text"]
+          }
+        },
+        "mistral": {
+          "name": "Mistral",
+          "modalities": {
+            "input": ["text"],
+            "output": ["text"]
+          }
+        }
+      }
+    },
+    "ollama-remote": {
+      "npm": "@ai-sdk/ollama",
+      "name": "Ollama Remote",
+      "options": {
+        "baseURL": "http://192.168.1.100:11434/v1",
+        "apiKey": "ollama"
+      },
+      "models": {
+        "llama3.2": {
+          "name": "Llama 3.2 (Remote)",
+          "modalities": {
+            "input": ["text"],
+            "output": ["text"]
+          }
+        }
+      }
+    },
+    "digitalocean-oss": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "DigitalOcean OpenAI Compatible OSS",
+      "options": {
+        "baseURL": "https://inference.do-ai.run/v1",
+        "apiKey": "sk-do-YOUR-KEY-HERE"
+      },
+      "models": {
+        "openai-gpt-oss-120b": {
+          "name": "OpenAI GPT OSS 120B",
+          "modalities": {
+            "input": ["text"],
+            "output": ["text"]
+          }
+        }
+      }
+    }
+  }
+}
