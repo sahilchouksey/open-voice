@@ -18,34 +18,69 @@ The intended integration shape is:
 
 `web app -> @open-voice/web-sdk -> open-voice runtime`
 
-For local smoke testing during development, run the runtime server and then:
+## Quick Start
 
-`bun run smoke`
+### Install
 
-Before realtime demo testing, verify runtime engines:
+```bash
+npm install @open-voice/web-sdk
+# or
+bun add @open-voice/web-sdk
+```
 
-- `GET /v1/engines` should report a default `stt` engine with `available: true`
-- if `vad` exists, default `vad` should also be `available: true`
+### Basic Usage
 
-## React Demo (SDK Integration)
+```typescript
+import { OpenVoiceWebClient, VoiceAgent } from "@open-voice/web-sdk"
 
-The demo frontend is now a Vite + React app under:
+// Create client
+const client = new OpenVoiceWebClient({
+  baseUrl: "http://localhost:7860"
+})
 
-`demos/frontend/`
+// Connect to session
+const session = await client.ws.connectSession({
+  mode: "voice",
+  audio: {
+    input: "browser",     // Use browser microphone
+    output: "streaming"   // Use Web Audio API for output
+  }
+})
+```
 
-Run it with:
+## Running the Demo
 
-`cd /home/xix3r/Documents/fun/open-voice/demos/frontend`
+### Prerequisites
 
-`bun install`
+1. **Runtime Server** (see `packages/runtime/README.md`):
+   ```bash
+   python -m open_voice_runtime.app.asgi
+   ```
 
-`bun run dev`
+2. **OpenCode Server** (see `.opencode/README.md`):
+   ```bash
+   cd .opencode
+   bun run dev
+   ```
 
-This demo is intended as a full integration reference for `@open-voice/web-sdk`:
+### Run Demo Frontend
 
-- detailed tab: explicit controls and full event tracing
-- minimal tab: auto-connect + auto-listen with `send_now` queue policy and radial visualizer
-- both tabs consume the SDK client/session APIs directly
+```bash
+cd demos/frontend
+bun install
+bun run dev
+```
+
+Then open `http://localhost:5173` in your browser.
+
+## Demo Features
+
+The demo frontend provides two modes:
+
+- **Detailed tab**: Explicit controls and full event tracing
+- **Minimal tab**: Auto-connect + auto-listen with `send_now` queue policy and radial visualizer
+
+Both tabs consume the SDK client/session APIs directly.
 
 ## Interruption + speaking controls in SDK
 
