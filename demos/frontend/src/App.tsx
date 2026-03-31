@@ -952,8 +952,9 @@ export function App() {
   const [isMicHoldActive, setIsMicHoldActive] = useState(false)
   const [minimalSettingsOpen, setMinimalSettingsOpen] = useState(false)
   const [minimalCaptionsEnabled, setMinimalCaptionsEnabled] = useState(() =>
-    resolveStoredFlag(MINIMAL_CAPTIONS_STORAGE_KEY, true),
+    resolveStoredFlag(MINIMAL_CAPTIONS_STORAGE_KEY, false),
   )
+  const [minimalCaptionStickyText, setMinimalCaptionStickyText] = useState("")
   const [minimalDetailEnabled, setMinimalDetailEnabled] = useState(() =>
     resolveStoredFlag(MINIMAL_DETAIL_STORAGE_KEY, false),
   )
@@ -1090,6 +1091,12 @@ export function App() {
     || ttsStreamActive
     || pendingSpeechAfterThinking
     || llmThinkingActive
+  const backendProcessingLike =
+    llmThinkingActive
+    || pendingSpeechAfterThinking
+    || pendingTurnPhase !== "idle"
+    || sessionStatus === "thinking"
+    || sessionStatus === "transcribing"
   const visualTurnPhase = useMemo<TurnPhase>(() => {
     if (ttsPlaybackActive || ttsStreamActive) {
       return "agent_speaking"
@@ -1102,6 +1109,12 @@ export function App() {
     if (turnPhase === "processing" || turnPhase === "agent_speaking") {
       return turnPhase
     }
+    if (Date.now() <= ttsVisualCompletedUntil) {
+      return "agent_speaking"
+    }
+    if (backendProcessingLike) {
+      return "processing"
+    }
     if (
       llmResponseCompletedAt > 0
       && Date.now() - llmResponseCompletedAt > 250
@@ -1110,11 +1123,8 @@ export function App() {
     ) {
       return sessionRef.current && micRef.current ? "listening" : "idle"
     }
-    if (Date.now() <= ttsVisualCompletedUntil) {
-      return "agent_speaking"
-    }
     return turnPhase
-  }, [llmResponseCompletedAt, turnPhase, ttsPlaybackActive, ttsStreamActive, ttsVisualCompletedUntil])
+  }, [backendProcessingLike, llmResponseCompletedAt, turnPhase, ttsPlaybackActive, ttsStreamActive, ttsVisualCompletedUntil])
   const isMicDisconnectedView =
     Boolean(sessionRef.current)
     && !isListening
@@ -1562,6 +1572,14 @@ export function App() {
   useEffect(() => {
     llmThinkingActiveRef.current = llmThinkingActive
   }, [llmThinkingActive])
+
+  useEffect(() => {
+    const text = sttLiveText.trim()
+    if (!text) {
+      return
+    }
+    setMinimalCaptionStickyText(text)
+  }, [sttLiveText])
 
   const clearEventFlushTimer = useCallback(() => {
     if (eventFlushTimerRef.current !== null) {
@@ -3121,6 +3139,7 @@ export function App() {
     sttUiTextRef.current = ""
     llmThinkingUiTextRef.current = ""
     llmResponseTextRef.current = ""
+    setMinimalCaptionStickyText("")
     clearSttUiTimer()
     clearLlmThinkingUiTimer()
     clearLlmResponseUiTimer()
@@ -3385,6 +3404,7 @@ export function App() {
       sttUiTextRef.current = ""
       clearSttUiTimer()
       flushSttUiText()
+      setMinimalCaptionStickyText("")
       llmThinkingUiTextRef.current = ""
       llmResponseTextRef.current = ""
       clearLlmThinkingUiTimer()
@@ -4015,7 +4035,7 @@ export function App() {
             {minimalCaptionsEnabled ? (
               <Card className="minimal-caption-card">
                 <div className="mini-stt minimal-caption" aria-live="polite">
-                  {sttLiveText || " "}
+                  {sttLiveText || minimalCaptionStickyText || " "}
                 </div>
               </Card>
             ) : null}
