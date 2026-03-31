@@ -34,6 +34,18 @@ type TurnPhase = "idle" | "listening" | "user_speaking" | "processing" | "agent_
 
 const MINIMAL_VISUALIZER_STYLE: "radial" | "grid" = "grid"
 
+const DEV_SERVER_LOGS = import.meta.env.DEV
+
+function devLog(...args: unknown[]) {
+  if (!DEV_SERVER_LOGS) return
+  console.log(...args)
+}
+
+function devWarn(...args: unknown[]) {
+  if (!DEV_SERVER_LOGS) return
+  console.warn(...args)
+}
+
 type TranscriptItem = TranscriptEntry
 
 interface SessionConversationHistory {
@@ -264,6 +276,7 @@ const DEMO_UI_LLM_DELTA_THROTTLE_MS = 16
 const DEMO_UI_MIC_LEVEL_THROTTLE_MS = 16
 const DEMO_UI_BAND_INTERVAL_MS = 16
 const DEMO_ERROR_SPEECH_COOLDOWN_MS = 12000
+const DEMO_MIC_CAPTURE_STALE_MS = 2600
 
 const DEMO_SEND_NOW_RUNTIME_OWNED_COMMIT = false
 const MINIMAL_CAPTIONS_STORAGE_KEY = "openvoice.minimal.captions"
@@ -456,7 +469,7 @@ class VisualizedPcmPlayer implements AudioOutputAdapter {
   }
 
   private markPlaybackActive(active: boolean) {
-    console.log("[AudioOutput] markPlaybackActive:", active)
+    devLog("[AudioOutput] markPlaybackActive:", active)
     this.onPlaybackActiveChange(active)
   }
 
@@ -471,10 +484,10 @@ class VisualizedPcmPlayer implements AudioOutputAdapter {
   }
 
   async appendTtsChunk(chunk: TtsChunk): Promise<void> {
-    console.log("[AudioOutput] appendTtsChunk called, data length:", chunk.data.byteLength, "sampleRate:", chunk.sampleRateHz)
+    devLog("[AudioOutput] appendTtsChunk called, data length:", chunk.data.byteLength, "sampleRate:", chunk.sampleRateHz)
     await this.ensureContext(chunk.sampleRateHz)
     if (!this.audioContext) {
-      console.log("[AudioOutput] no audioContext, returning early")
+      devLog("[AudioOutput] no audioContext, returning early")
       return
     }
 
@@ -512,7 +525,7 @@ class VisualizedPcmPlayer implements AudioOutputAdapter {
   }
 
   async flush(reason?: string): Promise<void> {
-    console.log("[AudioOutput] flush called, reason:", reason, "activeSources:", this.activeSources.size)
+    devLog("[AudioOutput] flush called, reason:", reason, "activeSources:", this.activeSources.size)
     for (const source of this.activeSources) {
       try {
         source.stop()
@@ -1018,6 +1031,9 @@ export function App() {
   const micLevelUiLastPaintAtRef = useRef(0)
   const micLevelUiPendingRef = useRef(0)
   const micLevelUiTimerRef = useRef<number | null>(null)
+  const micStartInFlightRef = useRef(false)
+  const freeMicWantedRef = useRef(true)
+  const lastMicChunkAtRef = useRef(0)
 
   const clearSpeakingFlags = useCallback(() => {
     ttsPlayingRef.current = false
@@ -1026,6 +1042,17 @@ export function App() {
     setTtsStreamActive(false)
     setTtsVisualCompletedUntil(0)
   }, [setTtsPlaybackActive, setTtsStreamActive])
+
+  const isMicCaptureStale = useCallback(() => {
+    if (!micRef.current) {
+      return false
+    }
+    const lastChunkAt = lastMicChunkAtRef.current
+    if (lastChunkAt <= 0) {
+      return false
+    }
+    return Date.now() - lastChunkAt > DEMO_MIC_CAPTURE_STALE_MS
+  }, [])
 
   const canConnect = !sessionRef.current
 
@@ -1048,6 +1075,10 @@ export function App() {
     // If user is actively speaking, respect that state
     if (turnPhase === "user_speaking") {
       return "user_speaking"
+    }
+    // Never force listening/idle while still processing or speaking.
+    if (turnPhase === "processing" || turnPhase === "agent_speaking") {
+      return turnPhase
     }
     if (
       llmResponseCompletedAt > 0
@@ -1733,7 +1764,17 @@ export function App() {
   }, [clearIdleTransitionTimer, hasAssistantFlowActive])
 
   const setTurnPhaseStable = useCallback((phase: TurnPhase) => {
-    setTurnPhase(phase)
+    // SDK selectTurnPhase is the canonical source of truth.
+    // Keep only local timing markers for diagnostics/visual smoothing decisions.
+    const now = Date.now()
+    turnPhaseLastSetAtRef.current = now
+    if (phase === "agent_speaking") {
+      turnPhaseStickyUntilRef.current = now + DEMO_PHASE_DEBOUNCE_MS
+    } else if (phase === "processing") {
+      turnPhaseStickyUntilRef.current = now + Math.max(DEMO_PHASE_DEBOUNCE_MS, 220)
+    } else {
+      turnPhaseStickyUntilRef.current = now
+    }
   }, [])
 
   const clearGenerationWatchdog = useCallback(() => {
@@ -1913,6 +1954,20 @@ export function App() {
 
   const handleAgentSignal = useCallback((signal: VoiceAgentSignal) => {
     if (signal.type === "session.status") {
+      if (mode === "minimal") {
+        devLog("[MIC DEBUG] session.status", {
+          status: signal.status,
+          reason: signal.reason,
+          hasMic: Boolean(micRef.current),
+          micStartInFlight: micStartInFlightRef.current,
+          isListening,
+          freeWanted: freeMicWantedRef.current,
+          sessionStatus: sessionStatusRef.current,
+          turnPhase: turnPhaseRef.current,
+          ttsPlaying: ttsPlayingRef.current,
+          ttsStreamActive: ttsStreamActiveRef.current,
+        })
+      }
       pushTraceLocal(
         "ui.session.status",
         {
@@ -1950,6 +2005,9 @@ export function App() {
           ) {
             return "agent_speaking" as TurnPhase
           }
+          if (llmThinkingActiveRef.current || Date.now() < thinkingHoldUntilRef.current) {
+            return "processing" as TurnPhase
+          }
           if (pendingTurnPhase !== "idle") {
             return "processing" as TurnPhase
           }
@@ -1972,12 +2030,21 @@ export function App() {
           sttTrackStateRef.current.reset()
         }
         // Auto-start mic in free-mic mode when returning to listening
+        const micStale = isMicCaptureStale()
         if (
-          !minimalMicUserControlledRef.current
-          && !micRef.current
+          freeMicWantedRef.current
+          && (!micRef.current || micStale)
+          && !micStartInFlightRef.current
           && sessionRef.current
-          && !isListening
         ) {
+          devLog("[MIC DEBUG] auto-start from session.status", {
+            status: signal.status,
+            hasMic: Boolean(micRef.current),
+            micStale,
+            micStartInFlight: micStartInFlightRef.current,
+            isListening,
+            freeWanted: freeMicWantedRef.current,
+          })
           void startListening()
         }
       } else if (
@@ -1996,11 +2063,17 @@ export function App() {
         // Auto-start mic in free-mic mode when session becomes available
         if (
           signal.status === "interrupted"
-          && !minimalMicUserControlledRef.current
+          && freeMicWantedRef.current
           && !micRef.current
+          && !micStartInFlightRef.current
           && sessionRef.current
-          && !isListening
         ) {
+          devLog("[MIC DEBUG] auto-start from interrupted", {
+            hasMic: Boolean(micRef.current),
+            micStartInFlight: micStartInFlightRef.current,
+            isListening,
+            freeWanted: freeMicWantedRef.current,
+          })
           void startListening()
         }
       }
@@ -2234,12 +2307,20 @@ export function App() {
         setPendingSpeechAfterThinking(false)
         clearSpeechWatchdog()
         // Auto-start mic in free-mic mode after TTS completes
+        const micStale = isMicCaptureStale()
         if (
-          !minimalMicUserControlledRef.current
-          && !micRef.current
+          freeMicWantedRef.current
+          && (!micRef.current || micStale)
+          && !micStartInFlightRef.current
           && sessionRef.current
-          && !isListening
         ) {
+          devLog("[MIC DEBUG] auto-start from tts.complete", {
+            hasMic: Boolean(micRef.current),
+            micStale,
+            micStartInFlight: micStartInFlightRef.current,
+            isListening,
+            freeWanted: freeMicWantedRef.current,
+          })
           void startListening()
         }
       }
@@ -2261,12 +2342,20 @@ export function App() {
       setTurnPhaseStable(sessionRef.current && micRef.current ? "listening" : "idle")
       void hardStopPlayback()
       // Auto-start mic in free-mic mode after interruption acknowledged
+      const micStale = isMicCaptureStale()
       if (
-        !minimalMicUserControlledRef.current
-        && !micRef.current
+        freeMicWantedRef.current
+        && (!micRef.current || micStale)
+        && !micStartInFlightRef.current
         && sessionRef.current
-        && !isListening
       ) {
+        devLog("[MIC DEBUG] auto-start from interrupt.ack", {
+          hasMic: Boolean(micRef.current),
+          micStale,
+          micStartInFlight: micStartInFlightRef.current,
+          isListening,
+          freeWanted: freeMicWantedRef.current,
+        })
         void startListening()
       }
       interruptionInFlightRef.current = false
@@ -2559,19 +2648,19 @@ export function App() {
   const handleRawEvent = useCallback((event: ConversationEvent) => {
     if (event.type === "tts.chunk") {
       const chunk = event.chunk as { data_base64?: unknown; sequence?: unknown }
-      console.log("[TTS] chunk received, sequence:", chunk.sequence, "data length:", typeof chunk.data_base64 === "string" ? chunk.data_base64.length : "unknown")
+      devLog("[TTS] chunk received, sequence:", chunk.sequence, "data length:", typeof chunk.data_base64 === "string" ? chunk.data_base64.length : "unknown")
     }
     if (event.type === "tts.completed") {
-      console.log("[TTS] completed, duration_ms:", (event as { duration_ms?: number }).duration_ms)
+      devLog("[TTS] completed, duration_ms:", (event as { duration_ms?: number }).duration_ms)
     }
     if (event.type === "llm.error") {
-      console.log("[LLM] error event:", event)
+      devLog("[LLM] error event:", event)
       const code = event.error?.code ?? null
       const message = event.error?.message ?? "unknown error"
       announceLlmError(message, code)
     }
     if (event.type === "llm.completed") {
-      console.log("[LLM] completed")
+      devLog("[LLM] completed")
     }
 
     appendEvent(event)
@@ -2592,119 +2681,184 @@ export function App() {
   }, [announceLlmError, appendEvent, clearSpeechWatchdog, setTurnPhaseStable])
 
   const startListening = useCallback(async () => {
+    if (micStartInFlightRef.current) {
+      devLog("[MIC DEBUG] startListening skipped (already in flight)", {
+        hasSession: Boolean(sessionRef.current),
+        hasMic: Boolean(micRef.current),
+        isListening,
+        sessionStatus: sessionStatusRef.current,
+        turnPhase: turnPhaseRef.current,
+        freeWanted: freeMicWantedRef.current,
+      })
+      return
+    }
+    devLog("[MIC DEBUG] startListening called", {
+      hasSession: Boolean(sessionRef.current),
+      hasMic: Boolean(micRef.current),
+      micStartInFlight: micStartInFlightRef.current,
+      isListening,
+      sessionStatus: sessionStatusRef.current,
+      turnPhase: turnPhaseRef.current,
+      freeWanted: freeMicWantedRef.current,
+    })
     if (!sessionRef.current || isDisconnectingRef.current) return
     if (micRef.current) {
-      dispatchSession({ type: "setListeningOnly", isListening: true })
-      return
+      const lastChunkAt = lastMicChunkAtRef.current
+      const staleMs = lastChunkAt > 0 ? Date.now() - lastChunkAt : 0
+      const micStale = lastChunkAt > 0 && staleMs > DEMO_MIC_CAPTURE_STALE_MS
+      if (!micStale) {
+        dispatchSession({ type: "setListeningOnly", isListening: true })
+        return
+      }
+      devWarn("[MIC DEBUG] startListening recreating stale mic", {
+        staleMs,
+        lastChunkAt,
+        hasMic: Boolean(micRef.current),
+        sessionStatus: sessionStatusRef.current,
+        turnPhase: turnPhaseRef.current,
+      })
+      const staleMic = micRef.current
+      micRef.current = null
+      lastMicChunkAtRef.current = 0
+      dispatchSession({ type: "setListeningOnly", isListening: false })
+      queueMicLevelUi(0, true)
+      setMicBands(zeroBands())
+      await staleMic.stop().catch(() => undefined)
     }
+    micStartInFlightRef.current = true
     const lifecycleToken = ++micLifecycleTokenRef.current
-    if (!window.isSecureContext) {
-      throw new Error("Microphone requires HTTPS (or localhost).")
-    }
-    pushTraceLocal("ui.start_listening", {
-      session_id: sessionRef.current.sessionId,
-    })
-    const mic = new DemoMicInput(
-      (chunk) => agentRef.current?.sendAudio(chunk),
-      (level) => {
-        const normalizedLevel = Math.max(0, level)
-        queueMicLevelUi(Math.min(100, Math.round(level * 140)))
+    try {
+      if (!window.isSecureContext) {
+        throw new Error("Microphone requires HTTPS (or localhost).")
+      }
+      pushTraceLocal("ui.start_listening", {
+        session_id: sessionRef.current.sessionId,
+      })
+      const mic = new DemoMicInput(
+        (chunk) => agentRef.current?.sendAudio(chunk),
+        (level) => {
+          const normalizedLevel = Math.max(0, level)
+          queueMicLevelUi(Math.min(100, Math.round(level * 140)))
 
-        if (effectiveQueuePolicy !== "send_now") {
-          localBargeInFramesRef.current = 0
-          localBargeInNoiseFloorRef.current = 0
-          return
-        }
-
-        const agentAudioPlaying = ttsPlayingRef.current || ttsStreamActiveRef.current
-
-        if (!agentAudioPlaying || interruptionInFlightRef.current) {
-          localBargeInFramesRef.current = 0
-          localBargeInNoiseFloorRef.current = normalizedLevel
-          return
-        }
-
-        const currentFloor = localBargeInNoiseFloorRef.current || normalizedLevel
-        const nextFloor =
-          currentFloor * (1 - DEMO_LOCAL_BARGE_IN_FLOOR_ALPHA)
-          + normalizedLevel * DEMO_LOCAL_BARGE_IN_FLOOR_ALPHA
-        localBargeInNoiseFloorRef.current = nextFloor
-        const dynamicThreshold = Math.min(
-          0.65,
-          Math.max(
-            DEMO_LOCAL_BARGE_IN_PEAK_THRESHOLD,
-            nextFloor * DEMO_LOCAL_BARGE_IN_FLOOR_MULTIPLIER + DEMO_LOCAL_BARGE_IN_FLOOR_BIAS,
-          ),
-        )
-
-        const now = Date.now()
-        if (now < localBargeInCooldownUntilRef.current) {
-          return
-        }
-
-        if (now > allowAutoInterruptUntilRef.current) {
-          localBargeInFramesRef.current = 0
-          return
-        }
-
-        if (!DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT) {
-          localBargeInFramesRef.current = 0
-          return
-        }
-
-        if (normalizedLevel >= dynamicThreshold) {
-          localBargeInFramesRef.current += 1
-          if (localBargeInFramesRef.current >= DEMO_LOCAL_BARGE_IN_CONSECUTIVE_FRAMES) {
-            pushTraceLocal(
-              "ui.auto_interrupt.local_audio",
-              {
-                session_id: sessionRef.current?.sessionId ?? null,
-                peak: Number(normalizedLevel.toFixed(3)),
-                floor: Number(nextFloor.toFixed(3)),
-                threshold: Number(dynamicThreshold.toFixed(3)),
-              },
-              "ui.action",
-            )
-            triggerImmediateInterrupt("local_audio")
+          if (effectiveQueuePolicy !== "send_now") {
+            localBargeInFramesRef.current = 0
+            localBargeInNoiseFloorRef.current = 0
+            return
           }
-        } else {
-          localBargeInFramesRef.current = 0
-        }
-      },
-      (bands) => {
-        setMicBands(bands)
-      },
-      (meta) => {
-        pushTraceLocal("audio.input.chunk", meta, "audio.chunk")
-      },
-    )
-    await mic.start()
-    if (lifecycleToken !== micLifecycleTokenRef.current || !sessionRef.current || micRef.current) {
-      await mic.stop().catch(() => undefined)
-      return
-    }
-    micRef.current = mic
-    dispatchSession({ type: "setListeningOnly", isListening: true })
-    // Keep user_speaking if user was recently speaking
-    const recentUserSpeech = Date.now() - lastUserSpeechAtRef.current <= 1500
-    if (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready") {
-      setTurnPhaseStable(recentUserSpeech ? "user_speaking" : "listening")
+
+          const agentAudioPlaying = ttsPlayingRef.current || ttsStreamActiveRef.current
+
+          if (!agentAudioPlaying || interruptionInFlightRef.current) {
+            localBargeInFramesRef.current = 0
+            localBargeInNoiseFloorRef.current = normalizedLevel
+            return
+          }
+
+          const currentFloor = localBargeInNoiseFloorRef.current || normalizedLevel
+          const nextFloor =
+            currentFloor * (1 - DEMO_LOCAL_BARGE_IN_FLOOR_ALPHA)
+            + normalizedLevel * DEMO_LOCAL_BARGE_IN_FLOOR_ALPHA
+          localBargeInNoiseFloorRef.current = nextFloor
+          const dynamicThreshold = Math.min(
+            0.65,
+            Math.max(
+              DEMO_LOCAL_BARGE_IN_PEAK_THRESHOLD,
+              nextFloor * DEMO_LOCAL_BARGE_IN_FLOOR_MULTIPLIER + DEMO_LOCAL_BARGE_IN_FLOOR_BIAS,
+            ),
+          )
+
+          const now = Date.now()
+          if (now < localBargeInCooldownUntilRef.current) {
+            return
+          }
+
+          if (now > allowAutoInterruptUntilRef.current) {
+            localBargeInFramesRef.current = 0
+            return
+          }
+
+          if (!DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT) {
+            localBargeInFramesRef.current = 0
+            return
+          }
+
+          if (normalizedLevel >= dynamicThreshold) {
+            localBargeInFramesRef.current += 1
+            if (localBargeInFramesRef.current >= DEMO_LOCAL_BARGE_IN_CONSECUTIVE_FRAMES) {
+              pushTraceLocal(
+                "ui.auto_interrupt.local_audio",
+                {
+                  session_id: sessionRef.current?.sessionId ?? null,
+                  peak: Number(normalizedLevel.toFixed(3)),
+                  floor: Number(nextFloor.toFixed(3)),
+                  threshold: Number(dynamicThreshold.toFixed(3)),
+                },
+                "ui.action",
+              )
+              triggerImmediateInterrupt("local_audio")
+            }
+          } else {
+            localBargeInFramesRef.current = 0
+          }
+        },
+        (bands) => {
+          setMicBands(bands)
+        },
+        (meta) => {
+          lastMicChunkAtRef.current = Date.now()
+          pushTraceLocal("audio.input.chunk", meta, "audio.chunk")
+        },
+      )
+      await mic.start()
+      if (lifecycleToken !== micLifecycleTokenRef.current || !sessionRef.current || micRef.current) {
+        await mic.stop().catch(() => undefined)
+        return
+      }
+      micRef.current = mic
+      lastMicChunkAtRef.current = Date.now()
+      dispatchSession({ type: "setListeningOnly", isListening: true })
+      devLog("[MIC DEBUG] startListening success", {
+        hasMic: Boolean(micRef.current),
+        isListening: true,
+        sessionStatus: sessionStatusRef.current,
+        freeWanted: freeMicWantedRef.current,
+      })
+      // Keep user_speaking if user was recently speaking
+      const recentUserSpeech = Date.now() - lastUserSpeechAtRef.current <= 1500
+      if (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready") {
+        setTurnPhaseStable(recentUserSpeech ? "user_speaking" : "listening")
+      }
+    } finally {
+      micStartInFlightRef.current = false
     }
   }, [
     effectiveQueuePolicy,
+    isListening,
     pushTraceLocal,
     queueMicLevelUi,
     setTurnPhaseStable,
     triggerImmediateInterrupt,
   ])
 
-  const stopListening = useCallback(async () => {
+  const stopListening = useCallback(async (reason = "unknown") => {
+    if (reason === "unknown") {
+      devWarn("[MIC DEBUG] stopListening unknown caller", new Error().stack)
+    }
+    devLog("[MIC DEBUG] stopListening called", {
+      reason,
+      hasMicBeforeStop: Boolean(micRef.current),
+      isListening,
+      sessionStatus: sessionStatusRef.current,
+      turnPhase: turnPhaseRef.current,
+      freeWanted: freeMicWantedRef.current,
+    })
     const lifecycleToken = ++micLifecycleTokenRef.current
     pushTraceLocal("ui.stop_listening", {
       session_id: sessionRef.current?.sessionId ?? null,
     })
     const mic = micRef.current
     micRef.current = null
+    lastMicChunkAtRef.current = 0
 
     dispatchSession({ type: "setListeningOnly", isListening: false })
     setIsMicHoldActive(false)
@@ -2771,6 +2925,39 @@ export function App() {
     setTurnPhaseStable("idle")
   }, [pushTraceLocal, queueMicLevelUi, setTurnPhaseStable])
 
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (!sessionRef.current || !freeMicWantedRef.current || !micRef.current) {
+        return
+      }
+      if (micStartInFlightRef.current || isDisconnectingRef.current) {
+        return
+      }
+      if (ttsPlayingRef.current || ttsStreamActiveRef.current) {
+        return
+      }
+      const lastChunkAt = lastMicChunkAtRef.current
+      if (lastChunkAt <= 0) {
+        return
+      }
+      const staleMs = Date.now() - lastChunkAt
+      if (staleMs <= DEMO_MIC_CAPTURE_STALE_MS) {
+        return
+      }
+      devWarn("[MIC DEBUG] watchdog restarting stale mic", {
+        staleMs,
+        sessionStatus: sessionStatusRef.current,
+        turnPhase: turnPhaseRef.current,
+        hasMic: Boolean(micRef.current),
+      })
+      void startListening()
+    }, 900)
+
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [startListening])
+
   const handleMinimalMicToggle = useCallback(async () => {
     if (!sessionRef.current) {
       return
@@ -2781,17 +2968,20 @@ export function App() {
     }
     minimalMicUserControlledRef.current = true
     setIsMicHoldActive(false)
-    if (micRef.current || isListening) {
-      await stopListening()
+    const shouldTurnMicOff = isListening || isMicHoldActive || micHoldActiveRef.current
+    if (shouldTurnMicOff) {
+      freeMicWantedRef.current = false
+      await stopListening("minimal.toggle_off")
       return
     }
     try {
+      freeMicWantedRef.current = true
       await startListening()
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       setLastError(`mic start failed: ${message}`)
     }
-  }, [isListening, startListening, stopListening])
+  }, [isListening, isMicHoldActive, startListening, stopListening])
 
   const handleMinimalMicPointerDown = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
     if (event.button !== 0 || !sessionRef.current) {
@@ -2799,6 +2989,7 @@ export function App() {
     }
     event.currentTarget.setPointerCapture(event.pointerId)
     minimalMicUserControlledRef.current = true
+    freeMicWantedRef.current = false
     clearMicHoldTimer()
     micHoldActiveRef.current = false
     micHoldTimerRef.current = window.setTimeout(() => {
@@ -2827,10 +3018,20 @@ export function App() {
     }
     micHoldActiveRef.current = false
     setIsMicHoldActive(false)
+    freeMicWantedRef.current = false
+    if (micStartInFlightRef.current) {
+      void stopListening("minimal.hold_release_inflight")
+      return
+    }
     if (micRef.current || isListening) {
-      void stopListening()
+      void stopListening("minimal.hold_release")
     }
   }, [clearMicHoldTimer, isListening, stopListening])
+
+  const handleToolbarStopListening = useCallback(async () => {
+    freeMicWantedRef.current = false
+    await stopListening("toolbar.stop_button")
+  }, [stopListening])
 
   const disconnect = useCallback(async () => {
     isDisconnectingRef.current = true
@@ -2838,7 +3039,8 @@ export function App() {
     pushTraceLocal("ui.disconnect", {
       session_id: sessionRef.current?.sessionId ?? null,
     })
-    await stopListening()
+    freeMicWantedRef.current = false
+    await stopListening("disconnect")
     agentSignalUnsubscribeRef.current?.()
     agentSignalUnsubscribeRef.current = null
     agentRealtimeSignalUnsubscribeRef.current?.()
@@ -3011,6 +3213,8 @@ export function App() {
               setTurnPhaseStable("agent_speaking")
             } else if (ttsStreamActiveRef.current) {
               setTurnPhaseStable("agent_speaking")
+            } else if (pendingSpeechAfterThinkingRef.current || llmThinkingActiveRef.current || Date.now() < thinkingHoldUntilRef.current) {
+              setTurnPhaseStable("processing")
             } else if (sessionRef.current && micRef.current) {
               setTurnPhaseStable("listening")
             } else {
@@ -3130,13 +3334,8 @@ export function App() {
       sessionStateUnsubscribeRef.current = session.onStateChange((state) => {
         dispatchSession({ type: "setSessionIdOnly", sessionId: state.sessionId })
         dispatchSession({ type: "setSessionStatusOnly", sessionStatus: state.sessionStatus === "disconnected" ? "disconnected" : state.sessionStatus })
-        dispatchSession({ type: "setTurnPhaseOnly", turnPhase: state.turnPhase })
-        if (state.sessionStatus === "listening" || state.sessionStatus === "ready") {
-          dispatchSession({ type: "setListeningOnly", isListening: true })
-        }
-        if (state.stt.interimText) {
-          dispatchSession({ type: "setSttLiveText", text: state.stt.interimText })
-        }
+        dispatchSession({ type: "setListeningOnly", isListening: Boolean(micRef.current) })
+        dispatchSession({ type: "setSttLiveText", text: state.stt.interimText ?? "" })
         dispatchSession({ type: "setLlmThinking", text: state.llm.thinkingText, active: state.llm.phase === "thinking" || state.llm.phase === "generating" })
         dispatchSession({ type: "setLlmResponse", text: state.llm.responseText })
         dispatchSession({ type: "setCurrentSpokenSegmentOnly", currentSpokenSegment: state.tts.currentSpokenSegment ?? "" })
@@ -3155,7 +3354,6 @@ export function App() {
       if (resumeFallbackReason) {
         setLastError("Requested session was unavailable, so a new session was started.")
       }
-      setSessionStatus("connected")
       clearEventFlushTimer()
       eventBufferRef.current = []
       setEvents([])
@@ -3195,6 +3393,7 @@ export function App() {
       activeGenerationIdRef.current = null
       rejectedGenerationIdsRef.current.clear()
       seenUserFinalRef.current = ""
+      lastMicChunkAtRef.current = 0
       localStorage.setItem("openvoice.runtimeBaseUrl", baseUrl)
       void refreshSessionHistory({ preserveError: true })
       if (resumedExistingSession) {
@@ -3350,7 +3549,7 @@ export function App() {
         } else {
           agentRef.current?.updateConfig({ turnQueue: { policy: "send_now" } })
         }
-        if (!minimalMicUserControlledRef.current && !micRef.current && sessionRef.current) {
+        if (freeMicWantedRef.current && !micRef.current && sessionRef.current) {
           await startListening()
         }
       } catch (error) {
@@ -3986,7 +4185,7 @@ export function App() {
           <Button disabled={!canConnect || !engineReadiness.ok} onClick={() => void connect()}>Connect</Button>
           <Button disabled={!sessionRef.current} onClick={() => void disconnect()}>Disconnect</Button>
           <Button disabled={!sessionRef.current || isListening} onClick={() => void startListening()}>Start listening</Button>
-          <Button disabled={!isListening} onClick={() => void stopListening()}>Stop listening</Button>
+          <Button disabled={!isListening} onClick={() => void handleToolbarStopListening()}>Stop listening</Button>
           <Button disabled={!sessionRef.current} onClick={interrupt}>Interrupt</Button>
           {/* <Button type="button" onClick={openHistoryPanel}>History</Button> */}
         </div>
