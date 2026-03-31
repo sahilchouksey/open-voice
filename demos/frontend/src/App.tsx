@@ -237,19 +237,19 @@ class ThinkingAudioPlayer {
 }
 
 const AUDIO_BAND_COUNT = 9
-const DEMO_MIN_SPEECH_DURATION_MS = 220
-const DEMO_VAD_ACTIVATION_THRESHOLD = 0.48
-const DEMO_UI_VAD_PROBABILITY_THRESHOLD = 0.6
+const DEMO_MIN_SPEECH_DURATION_MS = 320
+const DEMO_VAD_ACTIVATION_THRESHOLD = 0.62
+const DEMO_UI_VAD_PROBABILITY_THRESHOLD = 0.78
 const DEMO_INTERRUPT_COOLDOWN_MS = 350
-const DEMO_INTERRUPT_MIN_DURATION_SECONDS = 0.03
-const DEMO_INTERRUPT_MIN_WORDS = 1
+const DEMO_INTERRUPT_MIN_DURATION_SECONDS = 0.12
+const DEMO_INTERRUPT_MIN_WORDS = 2
 const DEMO_LOCAL_BARGE_IN_PEAK_THRESHOLD = 0.15
 const DEMO_LOCAL_BARGE_IN_CONSECUTIVE_FRAMES = 12
 const DEMO_LOCAL_BARGE_IN_COOLDOWN_MS = 1000
 const DEMO_LOCAL_BARGE_IN_FLOOR_ALPHA = 0.08
 const DEMO_LOCAL_BARGE_IN_FLOOR_MULTIPLIER = 2.2
 const DEMO_LOCAL_BARGE_IN_FLOOR_BIAS = 0.04
-const DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT = true
+const DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT = false
 const DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT = false
 const DEMO_ENABLE_VAD_AUTO_INTERRUPT = false
 const DEMO_STT_TRANSCRIPT_TIMEOUT_MS = 2000
@@ -301,6 +301,28 @@ function isLikelyAssistantEcho(partialText: string, assistantText: string): bool
   const assistant = normalizeSpeechCompare(assistantText)
   if (partial.length < 4 || assistant.length < 4) return false
   return assistant.includes(partial)
+}
+
+function isLikelyNoisePartial(text: string): boolean {
+  const trimmed = text.trim()
+  if (!trimmed) return true
+
+  const words = trimmed.split(/\s+/).filter(Boolean)
+  const alphaCount = (trimmed.match(/[a-z]/gi) ?? []).length
+
+  if (trimmed.length < 3) return true
+  if (alphaCount < 2) return true
+  if (words.length === 1 && alphaCount <= 2) return true
+
+  // Common non-speech keyboard mash patterns.
+  if (/^(?:[asdfjkl;]{2,}|[qwertyuiop]{2,}|[zxcvbnm]{2,}|[0-9]{2,})$/i.test(trimmed)) {
+    return true
+  }
+  if (/^(.)\1{2,}$/.test(trimmed)) {
+    return true
+  }
+
+  return false
 }
 
 function buildSpokenLlmErrorMessage(message: string, code?: string | null): string {
@@ -2198,9 +2220,12 @@ export function App() {
         return
       }
       const partialText = signal.text || ""
-      queueSttUiText(partialText)
+      const speechLikePartial = !isLikelyNoisePartial(partialText)
+      if (speechLikePartial) {
+        queueSttUiText(partialText)
+      }
       const hasPartialText = partialText.trim().length > 0
-      if (hasPartialText) {
+      if (hasPartialText && speechLikePartial) {
         lastUserSpeechAtRef.current = Date.now()
         if (!vadSpeechStartedAtRef.current) {
           vadSpeechStartedAtRef.current = Date.now()
@@ -2212,11 +2237,11 @@ export function App() {
         return
       }
       const shouldAutoBargeInterrupt = effectiveQueuePolicy === "send_now"
-      if (shouldAutoBargeInterrupt && DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT && (ttsPlayingRef.current || ttsStreamActiveRef.current) && !interruptionInFlightRef.current && interruptionPolicyRef.current.shouldInterruptFromPartial(partialText)) {
+      if (speechLikePartial && shouldAutoBargeInterrupt && DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT && (ttsPlayingRef.current || ttsStreamActiveRef.current) && !interruptionInFlightRef.current && interruptionPolicyRef.current.shouldInterruptFromPartial(partialText)) {
         pushTraceLocal("ui.auto_interrupt.stt_partial_candidate", { session_id: sessionRef.current?.sessionId ?? null, text: partialText }, "ui.action")
         triggerImmediateInterrupt("stt_partial")
       }
-      if (hasPartialText && canRenderUserSpeech) {
+      if (hasPartialText && speechLikePartial && canRenderUserSpeech) {
         setTurnPhaseStable("user_speaking")
       }
       return
