@@ -1045,6 +1045,10 @@ export function App() {
     if (ttsPlaybackActive || ttsStreamActive) {
       return "agent_speaking"
     }
+    // If user is actively speaking, respect that state
+    if (turnPhase === "user_speaking") {
+      return "user_speaking"
+    }
     if (
       llmResponseCompletedAt > 0
       && Date.now() - llmResponseCompletedAt > 250
@@ -1729,33 +1733,8 @@ export function App() {
   }, [clearIdleTransitionTimer, hasAssistantFlowActive])
 
   const setTurnPhaseStable = useCallback((phase: TurnPhase) => {
-    const now = Date.now()
-    const current = turnPhaseRef.current
-    if (
-      phase !== current
-      && (phase === "listening" || phase === "processing")
-      && now < turnPhaseStickyUntilRef.current
-    ) {
-      return
-    }
-    if (phase !== current && now - turnPhaseLastSetAtRef.current < DEMO_PHASE_DEBOUNCE_MS) {
-      return
-    }
-    turnPhaseLastSetAtRef.current = now
-
-    if (phase === "processing" || phase === "agent_speaking") {
-      turnPhaseStickyUntilRef.current = now + DEMO_PHASE_DEBOUNCE_MS
-    } else if (phase === "user_speaking") {
-      turnPhaseStickyUntilRef.current = now + Math.max(80, DEMO_PHASE_DEBOUNCE_MS / 2)
-    }
-
-    if (phase === "idle") {
-      scheduleIdleTransition()
-      return
-    }
-    clearIdleTransitionTimer()
     setTurnPhase(phase)
-  }, [clearIdleTransitionTimer, scheduleIdleTransition])
+  }, [])
 
   const clearGenerationWatchdog = useCallback(() => {
     if (generationWatchdogTimerRef.current !== null) {
@@ -1992,16 +1971,38 @@ export function App() {
           activeGenerationIdRef.current = null
           sttTrackStateRef.current.reset()
         }
+        // Auto-start mic in free-mic mode when returning to listening
+        if (
+          !minimalMicUserControlledRef.current
+          && !micRef.current
+          && sessionRef.current
+          && !isListening
+        ) {
+          void startListening()
+        }
       } else if (
         signal.status === "interrupted"
         || signal.status === "closed"
         || signal.status === "failed"
       ) {
         // now derived from SDK state
-        setTurnPhaseStable("idle")
+        // Check if user was recently speaking before setting to idle
+        const recentUserSpeech = Date.now() - lastUserSpeechAtRef.current <= 1500 && micRef.current
+        const nextPhase = recentUserSpeech ? "user_speaking" as TurnPhase : "idle" as TurnPhase
+        setTurnPhaseStable(nextPhase)
         pendingSpeechAfterThinkingRef.current = false
         setPendingSpeechAfterThinking(false)
         clearSpeechWatchdog()
+        // Auto-start mic in free-mic mode when session becomes available
+        if (
+          signal.status === "interrupted"
+          && !minimalMicUserControlledRef.current
+          && !micRef.current
+          && sessionRef.current
+          && !isListening
+        ) {
+          void startListening()
+        }
       }
       return
     }
@@ -2078,8 +2079,10 @@ export function App() {
         if (shouldAutoBargeInterrupt && DEMO_ENABLE_VAD_AUTO_INTERRUPT && DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT && interruptionPolicyRef.current.shouldInterruptFromVad({ type: "vad.state", kind: signal.kind, speaking: signal.speaking ?? false, probability: signal.probability ?? undefined })) {
           triggerImmediateInterrupt("vad")
         }
-        const agentCurrentlySpeaking = turnPhaseRef.current === "agent_speaking" || sessionStatusRef.current === "speaking" || ttsPlayingRef.current || ttsStreamActiveRef.current
-        if (!agentCurrentlySpeaking && canRenderUserSpeech) {
+        // Allow user_speaking even during interruption or when session is thinking
+        // as long as mic is active and user is actually speaking
+        const canRenderUserSpeech = micRef.current
+        if (canRenderUserSpeech) {
           lastUserSpeechAtRef.current = Date.now()
           setTurnPhaseStable("user_speaking")
         }
@@ -2097,6 +2100,13 @@ export function App() {
       } else if (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready") {
         const nextPhase = (() => {
           const prev = turnPhaseRef.current
+          // Keep user_speaking if user was recently detected speaking
+          if (prev === "user_speaking") {
+            const recentUserSpeech = Date.now() - lastUserSpeechAtRef.current <= 1500
+            if (recentUserSpeech && micRef.current) {
+              return "user_speaking" as TurnPhase
+            }
+          }
           if (prev === "agent_speaking") return prev
           if (prev === "processing" && Date.now() < thinkingHoldUntilRef.current) return prev
           return (micRef.current ? "listening" : "idle") as TurnPhase
@@ -2223,6 +2233,15 @@ export function App() {
         pendingSpeechAfterThinkingRef.current = false
         setPendingSpeechAfterThinking(false)
         clearSpeechWatchdog()
+        // Auto-start mic in free-mic mode after TTS completes
+        if (
+          !minimalMicUserControlledRef.current
+          && !micRef.current
+          && sessionRef.current
+          && !isListening
+        ) {
+          void startListening()
+        }
       }
       return
     }
@@ -2241,6 +2260,15 @@ export function App() {
       sttTrackStateRef.current.reset()
       setTurnPhaseStable(sessionRef.current && micRef.current ? "listening" : "idle")
       void hardStopPlayback()
+      // Auto-start mic in free-mic mode after interruption acknowledged
+      if (
+        !minimalMicUserControlledRef.current
+        && !micRef.current
+        && sessionRef.current
+        && !isListening
+      ) {
+        void startListening()
+      }
       interruptionInFlightRef.current = false
       return
     }
@@ -2452,8 +2480,12 @@ export function App() {
   }, [hardStopPlaybackNow, pushTraceLocal, rejectGeneration])
 
   const activeGridBands = useMemo(() => {
+    // Always use mic bands when user is speaking or mic is active
+    if (micBands.length > 0 && !ttsStreamActive) {
+      return micBands
+    }
     return visualTurnPhase === "agent_speaking" ? ttsBands : micBands
-  }, [micBands, ttsBands, visualTurnPhase])
+  }, [micBands, ttsBands, visualTurnPhase, ttsStreamActive])
 
   const runtimeConfig = useMemo<RuntimeSessionConfig>(() => {
     const effectivePolicy = effectiveQueuePolicy
@@ -2653,8 +2685,10 @@ export function App() {
     }
     micRef.current = mic
     dispatchSession({ type: "setListeningOnly", isListening: true })
+    // Keep user_speaking if user was recently speaking
+    const recentUserSpeech = Date.now() - lastUserSpeechAtRef.current <= 1500
     if (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready") {
-      setTurnPhaseStable("listening")
+      setTurnPhaseStable(recentUserSpeech ? "user_speaking" : "listening")
     }
   }, [
     effectiveQueuePolicy,
@@ -3690,7 +3724,7 @@ export function App() {
               ) : (
                 <GridVisualizer
                   state={radialClass}
-                  speakingRole={visualTurnPhase === "agent_speaking" ? "agent" : "user"}
+                  speakingRole={turnPhase === "agent_speaking" || visualTurnPhase === "agent_speaking" ? "agent" : "user"}
                   level={Math.max(0.08, micLevel / 100)}
                   rowCount={9}
                   columnCount={9}
