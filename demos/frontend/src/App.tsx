@@ -249,7 +249,7 @@ const DEMO_LOCAL_BARGE_IN_COOLDOWN_MS = 1000
 const DEMO_LOCAL_BARGE_IN_FLOOR_ALPHA = 0.08
 const DEMO_LOCAL_BARGE_IN_FLOOR_MULTIPLIER = 2.2
 const DEMO_LOCAL_BARGE_IN_FLOOR_BIAS = 0.04
-const DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT = false
+const DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT = true
 const DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT = false
 const DEMO_ENABLE_VAD_AUTO_INTERRUPT = false
 const DEMO_STT_TRANSCRIPT_TIMEOUT_MS = 2000
@@ -2169,6 +2169,20 @@ export function App() {
         lastUserSpeechAtRef.current = Date.now()
         allowAutoInterruptUntilRef.current = 0
       }
+      const hasSpeechLikeFinal = signal.text.trim().length > 0 && !isLikelyNoisePartial(signal.text)
+      const agentCurrentlySpeaking =
+        turnPhaseRef.current === "agent_speaking"
+        || sessionStatusRef.current === "speaking"
+        || ttsPlayingRef.current
+        || ttsStreamActiveRef.current
+      if (
+        effectiveQueuePolicy === "send_now"
+        && hasSpeechLikeFinal
+        && agentCurrentlySpeaking
+        && !interruptionInFlightRef.current
+      ) {
+        triggerImmediateInterrupt("stt_final")
+      }
       queueSttUiText(signal.text || "", true)
       setTurnPhaseStable("processing")
       const dedupeKey = `${signal.turnId ?? "-"}:${signal.text}`
@@ -2565,7 +2579,7 @@ export function App() {
     return `STT final: ${details.join(", ")}`
   }, [sttFinalMeta.deferred, sttFinalMeta.finality, sttFinalMeta.revision])
 
-  const triggerImmediateInterrupt = useCallback((source: "vad" | "stt_partial" | "local_audio") => {
+  const triggerImmediateInterrupt = useCallback((source: "vad" | "stt_partial" | "stt_final" | "local_audio") => {
     const session = sessionRef.current
     if (!session) return
     const now = Date.now()
@@ -2582,7 +2596,7 @@ export function App() {
       return
     }
 
-    if (!interruptionPolicyRef.current.canInterrupt(now)) {
+    if (source !== "stt_final" && !interruptionPolicyRef.current.canInterrupt(now)) {
       return
     }
 
@@ -2598,6 +2612,8 @@ export function App() {
         ? "ui.auto_interrupt.vad"
         : source === "stt_partial"
           ? "ui.auto_interrupt.stt_partial"
+          : source === "stt_final"
+            ? "ui.auto_interrupt.stt_final"
           : "ui.auto_interrupt.local_audio"
     pushTraceLocal(
       interruptEventName,
