@@ -124,6 +124,10 @@ def test_open_voice_prompt_builder_layers_runtime_and_tool_context() -> None:
     assert "say only the domain name" in prompt
     assert "Never mention that you cannot hear audio or are text-only" in prompt
     assert (
+        "Never ask the user to type, paste, click, tap, copy, upload, or use the keyboard" in prompt
+    )
+    assert "ask the user to say it aloud, spell it slowly, or answer verbally" in prompt
+    assert (
         "Never mention internal tools routing decisions model names or runtime internals" in prompt
     )
     assert "You are NOT a coding IDE assistant in this app" in prompt

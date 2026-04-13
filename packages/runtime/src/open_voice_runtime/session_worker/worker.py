@@ -238,6 +238,7 @@ class SessionWorker:
         client_turn_id: str | None,
         emit: ConversationEventEmitter | None,
     ) -> list[ConversationEvent]:
+        self._reset_tool_feedback_state()
         turn_id = self._state.begin_turn()
         self._runtime.active_turn_id = turn_id
         self._runtime.current_trace = TurnTrace(started_at=utterance.started_at_monotonic)
@@ -476,6 +477,7 @@ class SessionWorker:
         text = message.user_text.strip()
         if not text:
             return []
+        self._reset_tool_feedback_state()
         interrupt_events: list[ConversationEvent] = []
         if self._has_active_response():
             interrupt_events = await self._interrupt(
@@ -760,6 +762,12 @@ class SessionWorker:
 
     def _has_active_response(self) -> bool:
         return self._runtime.response_task is not None and not self._runtime.response_task.done()
+
+    def _reset_tool_feedback_state(self) -> None:
+        self._runtime.tool_speech_announcements.clear()
+        self._runtime.tool_search_statuses.clear()
+        self._runtime.tool_search_start_announced = False
+        self._runtime.tool_search_end_announced = False
 
     async def _handle_llm_event_for_feedback(
         self,

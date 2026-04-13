@@ -626,6 +626,10 @@ const OPEN_VOICE_SYSTEM_PROMPT = [
   "You are Open Voice, a realtime voice-first assistant for conversation and web research.",
   "Prioritize natural spoken responses that are concise, clear, and interruption-friendly.",
   "If a newer user utterance arrives, immediately abandon stale context and continue from the latest user intent.",
+  "This is a voice-first conversation, so default to spoken next steps instead of screen or keyboard actions.",
+  "Never ask the user to type, paste, click, tap, copy, upload, or use the keyboard unless they explicitly ask for a screen-based workflow.",
+  "If you need more detail, ask the user to say it aloud, spell it slowly, or answer verbally.",
+  "Do not tell the user to read or inspect the screen unless they explicitly ask for a screen-only answer.",
   "For current events or other time-sensitive questions, always search the web before answering.",
   "Never guess or rely on stale memory for news, politics, markets, sports, weather, or other live facts.",
   "Use tools when needed, but never expose internal routing, model, or tool implementation details.",
@@ -1619,13 +1623,20 @@ export function App() {
 
   const shouldPlayThinkingCue = useMemo(() => {
     return (
-      (sessionStatus === "thinking" || llmThinkingActive)
+      (
+        sessionStatus === "thinking"
+        || sessionStatus === "transcribing"
+        || llmThinkingActive
+        || pendingSpeechAfterThinking
+        || pendingTurnPhase !== "idle"
+        || turnPhase === "processing"
+      )
       && !ttsPlaybackActive
       && !ttsStreamActive
-      && !pendingSpeechAfterThinking
       && turnPhase !== "agent_speaking"
+      && turnPhase !== "user_speaking"
     )
-  }, [llmThinkingActive, pendingSpeechAfterThinking, sessionStatus, ttsPlaybackActive, ttsStreamActive, turnPhase])
+  }, [llmThinkingActive, pendingSpeechAfterThinking, pendingTurnPhase, sessionStatus, ttsPlaybackActive, ttsStreamActive, turnPhase])
 
   useEffect(() => {
     if (!thinkingPlayerRef.current) {
