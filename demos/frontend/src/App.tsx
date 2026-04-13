@@ -83,6 +83,8 @@ interface DemoSessionState {
   sttProgress: { status: string | null; waitedMs: number | null; attempt: number | null }
   sttFinalMeta: { revision: number | null; finality: string | null; deferred: boolean | null; previousText: string | null }
   llmThinkingText: string
+  toolActivityText: string
+  toolActivityStatus: string
   llmResponseText: string
   llmThinkingActive: boolean
   llmResponseCompletedAt: number
@@ -107,6 +109,7 @@ type DemoSessionAction =
   | { type: "setSttProgress"; progress: DemoSessionState["sttProgress"] }
   | { type: "setSttFinalMeta"; meta: DemoSessionState["sttFinalMeta"] }
   | { type: "setLlmThinking"; text: string; active: boolean }
+  | { type: "setToolActivity"; text: string; status: string }
   | { type: "setLlmResponse"; text: string }
   | { type: "setLlmResponseCompletedAt"; at: number }
   | { type: "setTts"; currentSpokenSegment: string; playbackActive: boolean; streamActive: boolean }
@@ -127,6 +130,8 @@ const initialDemoSessionState: DemoSessionState = {
   sttProgress: { status: null, waitedMs: null, attempt: null },
   sttFinalMeta: { revision: null, finality: null, deferred: null, previousText: null },
   llmThinkingText: "",
+  toolActivityText: "",
+  toolActivityStatus: "",
   llmResponseText: "",
   llmThinkingActive: false,
   llmResponseCompletedAt: 0,
@@ -161,6 +166,8 @@ function demoSessionReducer(state: DemoSessionState, action: DemoSessionAction):
       return { ...state, sttFinalMeta: action.meta }
     case "setLlmThinking":
       return { ...state, llmThinkingText: action.text, llmThinkingActive: action.active }
+    case "setToolActivity":
+      return { ...state, toolActivityText: action.text, toolActivityStatus: action.status }
     case "setLlmResponse":
       return { ...state, llmResponseText: action.text }
     case "setLlmResponseCompletedAt":
@@ -184,6 +191,37 @@ function demoSessionReducer(state: DemoSessionState, action: DemoSessionAction):
     default:
       return state
   }
+}
+
+function describeToolActivity(toolName: string, status: string | null | undefined) {
+  const normalizedTool = toolName.trim().toLowerCase().replace(/[_-]+/g, " ")
+  const prettyTool = normalizedTool === "websearch"
+    ? "web search"
+    : normalizedTool === "webfetch"
+      ? "web fetch"
+      : (normalizedTool || "tool")
+  const nextStatus = (status ?? "").trim().toLowerCase()
+
+  if (prettyTool === "web search") {
+    if (nextStatus === "pending") return { summary: "Preparing web search…", spokenHint: null }
+    if (nextStatus === "running") return { summary: "Searching the web…", spokenHint: "Searching the web." }
+    if (nextStatus === "completed") return { summary: "Web search completed.", spokenHint: null }
+    if (nextStatus === "failed") return { summary: "Web search failed.", spokenHint: "The web search failed." }
+  }
+
+  if (prettyTool === "web fetch") {
+    if (nextStatus === "pending") return { summary: "Preparing page fetch…", spokenHint: null }
+    if (nextStatus === "running") return { summary: "Reading the page…", spokenHint: "Reading the page." }
+    if (nextStatus === "completed") return { summary: "Page fetch completed.", spokenHint: null }
+    if (nextStatus === "failed") return { summary: "Page fetch failed.", spokenHint: "The page fetch failed." }
+  }
+
+  const title = prettyTool ? prettyTool.charAt(0).toUpperCase() + prettyTool.slice(1) : "Tool"
+  if (nextStatus === "pending") return { summary: `${title} pending…`, spokenHint: null }
+  if (nextStatus === "running") return { summary: `${title} running…`, spokenHint: `Using ${prettyTool}.` }
+  if (nextStatus === "completed") return { summary: `${title} completed.`, spokenHint: null }
+  if (nextStatus === "failed") return { summary: `${title} failed.`, spokenHint: `${title} failed.` }
+  return { summary: title, spokenHint: null }
 }
 
 class ThinkingAudioPlayer {
@@ -250,8 +288,8 @@ const DEMO_LOCAL_BARGE_IN_FLOOR_ALPHA = 0.08
 const DEMO_LOCAL_BARGE_IN_FLOOR_MULTIPLIER = 2.2
 const DEMO_LOCAL_BARGE_IN_FLOOR_BIAS = 0.04
 const DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT = true
-const DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT = false
-const DEMO_ENABLE_VAD_AUTO_INTERRUPT = false
+const DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT = true
+const DEMO_ENABLE_VAD_AUTO_INTERRUPT = true
 const DEMO_STT_TRANSCRIPT_TIMEOUT_MS = 2000
 const DEMO_MIN_SILENCE_DURATION_MS = 1400
 const DEMO_POST_RELEASE_PROCESSING_GRACE_MS = 1400
@@ -869,7 +907,7 @@ export function App() {
 
   const [sessionState, dispatchSession] = useReducer(demoSessionReducer, initialDemoSessionState)
 
-  const { sessionId, sessionStatus, turnPhase, isListening, sttLiveText, llmThinkingText, llmResponseText, llmResponseCompletedAt, currentSpokenSegment, routeName, routeProvider, routeModel, transcript, ttsPlaybackActive, ttsStreamActive, llmThinkingActive, pendingTurnPhase, pendingTurnElapsedMs, sttProgress, sttFinalMeta } = sessionState
+  const { sessionId, sessionStatus, turnPhase, isListening, sttLiveText, llmThinkingText, toolActivityText, toolActivityStatus, llmResponseText, llmResponseCompletedAt, currentSpokenSegment, routeName, routeProvider, routeModel, transcript, ttsPlaybackActive, ttsStreamActive, llmThinkingActive, pendingTurnPhase, pendingTurnElapsedMs, sttProgress, sttFinalMeta } = sessionState
 
   const setTurnPhase = useCallback((phase: TurnPhase) => {
     dispatchSession({ type: "setTurnPhaseOnly", turnPhase: phase })
@@ -910,6 +948,10 @@ export function App() {
   const setLlmThinkingText = useCallback((text: string) => {
     dispatchSession({ type: "setLlmThinking", text, active: llmThinkingActive })
   }, [llmThinkingActive])
+
+  const setToolActivity = useCallback((text: string, status: string) => {
+    dispatchSession({ type: "setToolActivity", text, status })
+  }, [])
 
   const setLlmResponseText = useCallback((text: string) => {
     dispatchSession({ type: "setLlmResponse", text })
@@ -1036,6 +1078,9 @@ export function App() {
   const allowAutoInterruptUntilRef = useRef(0)
   const lastSpokenErrorKeyRef = useRef("")
   const lastSpokenErrorAtRef = useRef(0)
+  const lastToolUpdateKeyRef = useRef("")
+  const lastSpokenToolHintKeyRef = useRef("")
+  const lastSpokenToolHintAtRef = useRef(0)
   const suppressErrorSpeechUntilRef = useRef(0)
   const ignoreAssistantUpdatesUntilRef = useRef(0)
   const errorSpeechFallbackTimerRef = useRef<number | null>(null)
@@ -1572,6 +1617,31 @@ export function App() {
     llmThinkingActiveRef.current = llmThinkingActive
   }, [llmThinkingActive])
 
+  const shouldPlayThinkingCue = useMemo(() => {
+    return (
+      (sessionStatus === "thinking" || llmThinkingActive)
+      && !ttsPlaybackActive
+      && !ttsStreamActive
+      && !pendingSpeechAfterThinking
+      && turnPhase !== "agent_speaking"
+    )
+  }, [llmThinkingActive, pendingSpeechAfterThinking, sessionStatus, ttsPlaybackActive, ttsStreamActive, turnPhase])
+
+  useEffect(() => {
+    if (!thinkingPlayerRef.current) {
+      thinkingPlayerRef.current = new ThinkingAudioPlayer(thinkingCueUrl)
+    }
+    const player = thinkingPlayerRef.current
+    if (!player) {
+      return
+    }
+    if (shouldPlayThinkingCue) {
+      void player.start()
+      return
+    }
+    player.stop()
+  }, [shouldPlayThinkingCue])
+
   useEffect(() => {
     const text = sttLiveText.trim()
     if (!text) {
@@ -1748,11 +1818,13 @@ export function App() {
       return
     }
     activeAssistantTurnIdRef.current = normalizedTurnId
+    lastToolUpdateKeyRef.current = ""
     llmThinkingUiTextRef.current = ""
     llmResponseTextRef.current = ""
+    setToolActivity("", "")
     flushLlmThinkingUiText()
     flushLlmResponseUiText()
-  }, [flushLlmResponseUiText, flushLlmThinkingUiText])
+  }, [flushLlmResponseUiText, flushLlmThinkingUiText, setToolActivity])
 
   const clearSpeechWatchdog = useCallback(() => {
     if (speechWatchdogTimerRef.current !== null) {
@@ -1861,6 +1933,13 @@ export function App() {
     pendingSpeechAfterThinkingRef.current = false
     setPendingSpeechAfterThinking(false)
     thinkingPlayerRef.current?.stop()
+    try {
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel()
+      }
+    } catch {
+      // best-effort browser speech cancellation
+    }
     void sdkPlayerRef.current?.flush().catch(() => undefined)
     // now derived from SDK state
     setTurnPhaseStable(sessionRef.current && micRef.current ? "listening" : "idle")
@@ -1959,6 +2038,55 @@ export function App() {
     setTtsStreamActive,
     setTurnPhaseStable,
   ])
+
+  const announceToolHint = useCallback((spokenHint: string, dedupeKey: string) => {
+    const now = Date.now()
+    if (!spokenHint.trim()) {
+      return
+    }
+    if (ttsPlayingRef.current || ttsStreamActiveRef.current || interruptionInFlightRef.current) {
+      return
+    }
+    if (
+      dedupeKey === lastSpokenToolHintKeyRef.current
+      && now - lastSpokenToolHintAtRef.current < 4000
+    ) {
+      return
+    }
+    lastSpokenToolHintKeyRef.current = dedupeKey
+    lastSpokenToolHintAtRef.current = now
+    try {
+      const shouldResumeThinkingCue = Boolean(
+        llmThinkingActiveRef.current
+        && !ttsPlayingRef.current
+        && !ttsStreamActiveRef.current
+        && thinkingPlayerRef.current,
+      )
+      thinkingPlayerRef.current?.stop()
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel()
+        window.speechSynthesis.resume()
+        const utterance = new SpeechSynthesisUtterance(spokenHint)
+        utterance.lang = "en-US"
+        utterance.rate = 1
+        utterance.pitch = 1
+        utterance.volume = 1
+        utterance.onend = () => {
+          if (shouldResumeThinkingCue) {
+            void thinkingPlayerRef.current?.start()
+          }
+        }
+        utterance.onerror = () => {
+          if (shouldResumeThinkingCue) {
+            void thinkingPlayerRef.current?.start()
+          }
+        }
+        window.speechSynthesis.speak(utterance)
+      }
+    } catch {
+      // best-effort browser speech fallback
+    }
+  }, [])
 
   const startSpeechWatchdog = useCallback(() => {
     clearSpeechWatchdog()
@@ -2148,7 +2276,6 @@ export function App() {
           setTurnPhaseStable("processing")
         }
         startSpeechWatchdog()
-        thinkingPlayerRef.current.stop()
       } else {
         clearGenerationWatchdog()
         // now derived from SDK state
@@ -2255,6 +2382,26 @@ export function App() {
       }
       return
     }
+    if (signal.type === "assistant.tool") {
+      if (Date.now() < ignoreAssistantUpdatesUntilRef.current) {
+        return
+      }
+      const toolKey = `${signal.generationId ?? "-"}:${signal.toolName}:${signal.status ?? "-"}`
+      const nextSummary = signal.summary?.trim() ?? ""
+      if (nextSummary && toolKey !== lastToolUpdateKeyRef.current) {
+        lastToolUpdateKeyRef.current = toolKey
+        llmThinkingUiTextRef.current = nextSummary
+        setLlmThinkingActive(true)
+        queueLlmThinkingUiText(true)
+      }
+      if (signal.spokenHint) {
+        announceToolHint(signal.spokenHint, toolKey)
+      }
+      if (!ttsPlayingRef.current && !ttsStreamActiveRef.current) {
+        setTurnPhaseStable("processing")
+      }
+      return
+    }
     if (signal.type === "assistant.response.delta") {
       if (Date.now() < ignoreAssistantUpdatesUntilRef.current) {
         return
@@ -2310,6 +2457,13 @@ export function App() {
     if (signal.type === "assistant.speaking.state") {
       if (signal.state === "playing") {
         thinkingPlayerRef.current?.stop()
+        try {
+          if ("speechSynthesis" in window) {
+            window.speechSynthesis.cancel()
+          }
+        } catch {
+          // best-effort browser speech cancellation
+        }
         clearGenerationWatchdog()
         ttsStreamActiveRef.current = true
         setTtsStreamActive(true)
@@ -2358,6 +2512,13 @@ export function App() {
       pendingSpeechAfterThinkingRef.current = false
       setPendingSpeechAfterThinking(false)
       clearSpeechWatchdog()
+      try {
+        if ("speechSynthesis" in window) {
+          window.speechSynthesis.cancel()
+        }
+      } catch {
+        // best-effort browser speech cancellation
+      }
       setTurnPhaseStable(sessionRef.current && micRef.current ? "listening" : "idle")
       void hardStopPlayback()
       // Auto-start mic in free-mic mode after interruption acknowledged
@@ -2407,6 +2568,7 @@ export function App() {
     }
   }, [
     announceLlmError,
+    announceToolHint,
     clearSpeakingFlags,
     clearGenerationWatchdog,
     clearSpeechWatchdog,
@@ -2681,6 +2843,62 @@ export function App() {
     if (event.type === "llm.completed") {
       devLog("[LLM] completed")
     }
+    if (event.type === "llm.tool.update") {
+      const presentation = describeToolActivity(event.tool_name, event.status)
+      const toolKey = `${event.generation_id ?? "-"}:${event.tool_name}:${event.status ?? "-"}`
+      if (presentation.summary && toolKey !== lastToolUpdateKeyRef.current) {
+        lastToolUpdateKeyRef.current = toolKey
+        llmThinkingUiTextRef.current = presentation.summary
+        setLlmThinkingActive(true)
+        setToolActivity(presentation.summary, event.status ?? "")
+        pushTraceLocal(
+          "ui.tool.activity",
+          {
+            tool_name: event.tool_name,
+            status: event.status ?? null,
+            summary: presentation.summary,
+          },
+          "ui.state",
+        )
+        queueEventLine(
+          JSON.stringify(
+            {
+              type: "ui.tool.activity",
+              tool_name: event.tool_name,
+              status: event.status ?? null,
+              summary: presentation.summary,
+            },
+            null,
+            2,
+          ),
+        )
+        queueLlmThinkingUiText(true)
+      }
+      if (presentation.spokenHint) {
+        announceToolHint(presentation.spokenHint, toolKey)
+        pushTraceLocal(
+          "ui.tool.hint.spoken",
+          {
+            tool_name: event.tool_name,
+            status: event.status ?? null,
+            spoken_hint: presentation.spokenHint,
+          },
+          "ui.action",
+        )
+        queueEventLine(
+          JSON.stringify(
+            {
+              type: "ui.tool.hint.spoken",
+              tool_name: event.tool_name,
+              status: event.status ?? null,
+              spoken_hint: presentation.spokenHint,
+            },
+            null,
+            2,
+          ),
+        )
+      }
+    }
 
     appendEvent(event)
 
@@ -2697,7 +2915,7 @@ export function App() {
     if (event.type === "turn.accepted") {
       return
     }
-  }, [announceLlmError, appendEvent, clearSpeechWatchdog, setTurnPhaseStable])
+  }, [announceLlmError, announceToolHint, appendEvent, clearSpeechWatchdog, pushTraceLocal, queueEventLine, queueLlmThinkingUiText, setLlmThinkingActive, setToolActivity, setTurnPhaseStable])
 
   const startListening = useCallback(async () => {
     if (micStartInFlightRef.current) {
@@ -4241,7 +4459,12 @@ export function App() {
         </Card>
         <Card className="stage">
           <h2>LLM Thinking</h2>
-          <div className="stream-card">{llmThinkingText || " "}</div>
+          <div className="stream-card">{llmThinkingText || toolActivityText || " "}</div>
+        </Card>
+        <Card className="stage">
+          <h2>Tool Activity</h2>
+          <div className="stream-card">{toolActivityText || " "}</div>
+          <p className="subcopy">Status: {toolActivityStatus || "-"}</p>
         </Card>
         <Card className="stage">
           <h2>LLM Response</h2>

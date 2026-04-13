@@ -82,6 +82,74 @@ function generateThinkingSequence(rows: number, columns: number): Coordinate[] {
   return seq
 }
 
+function generateCenterOutColumnOrder(columnCount: number): number[] {
+  const centerLeft = Math.floor((columnCount - 1) / 2)
+  const centerRight = Math.ceil((columnCount - 1) / 2)
+  const order: number[] = []
+
+  for (let offset = 0; order.length < columnCount; offset += 1) {
+    const left = centerLeft - offset
+    const right = centerRight + offset
+    if (left >= 0) {
+      order.push(left)
+    }
+    if (right < columnCount && right !== left) {
+      order.push(right)
+    }
+  }
+
+  return order
+}
+
+function smoothColumnEnergy(values: number[]): number[] {
+  return values.map((value, index, source) => {
+    const left = source[Math.max(0, index - 1)] ?? value
+    const right = source[Math.min(source.length - 1, index + 1)] ?? value
+    return Math.max(0, Math.min(1, value * 0.6 + left * 0.2 + right * 0.2))
+  })
+}
+
+function buildCenteredColumnEnergy(
+  bands: number[] | undefined,
+  columnCount: number,
+  normalizedLevel: number,
+): number[] {
+  const order = generateCenterOutColumnOrder(columnCount)
+  const seed = Array.from({ length: columnCount }, () => Math.max(0.04, normalizedLevel * 0.12))
+
+  if (bands && bands.length > 0) {
+    for (let step = 0; step < order.length; step += 1) {
+      const column = order[step]!
+      const sourceIndex = Math.min(
+        bands.length - 1,
+        Math.floor((step / Math.max(1, order.length - 1)) * (bands.length - 1)),
+      )
+      const sample = Math.max(0, Math.min(1, bands[sourceIndex] ?? 0))
+      seed[column] = Math.max(seed[column] ?? 0, sample)
+
+      const left = column - 1
+      const right = column + 1
+      if (left >= 0) {
+        seed[left] = Math.max(seed[left] ?? 0, sample * 0.72)
+      }
+      if (right < columnCount) {
+        seed[right] = Math.max(seed[right] ?? 0, sample * 0.72)
+      }
+    }
+
+    return smoothColumnEnergy(smoothColumnEnergy(seed))
+  }
+
+  const center = (columnCount - 1) / 2
+  const fallback = Array.from({ length: columnCount }, (_, index) => {
+    const distance = Math.abs(index - center) / Math.max(1, center)
+    const resonance = Math.max(0.18, 1 - distance * 0.82)
+    return Math.max(0, Math.min(1, normalizedLevel * resonance))
+  })
+
+  return smoothColumnEnergy(fallback)
+}
+
 export function GridVisualizer({
   state,
   level,
@@ -149,21 +217,10 @@ export function GridVisualizer({
   }
 
   const normalizedLevel = Math.max(0, Math.min(1, level))
-  const volumeBands = useMemo(() => {
-    if (bands && bands.length > 0) {
-      return Array.from({ length: columnCount }, (_, i) => {
-        const value = bands[i % bands.length] ?? 0
-        return Math.max(0, Math.min(1, value))
-      })
-    }
-
-    return Array.from({ length: columnCount }, (_, i) => {
-      const center = (columnCount - 1) / 2
-      const distance = Math.abs(i - center) / Math.max(1, center)
-      const shape = Math.max(0.5, 1 - distance * 0.45)
-      return Math.max(0, Math.min(1, normalizedLevel * shape))
-    })
-  }, [bands, columnCount, normalizedLevel])
+  const volumeBands = useMemo(
+    () => buildCenteredColumnEnergy(bands, columnCount, normalizedLevel),
+    [bands, columnCount, normalizedLevel],
+  )
 
   return (
     <div
@@ -180,29 +237,30 @@ export function GridVisualizer({
         const row = Math.floor(i / columnCount)
         let isHighlighted = false
         let transitionDuration = interval / 100
+        const col = i % columnCount
+        const rowMidPoint = Math.floor(rowCount / 2)
+        const colMidPoint = (columnCount - 1) / 2
+        const columnDistance = Math.abs(col - colMidPoint) / Math.max(1, colMidPoint)
+        const rowDistance = Math.abs(rowMidPoint - row) / Math.max(1, rowMidPoint)
 
         if (gridState === "speaking" && speakingRole === "user") {
-          // Preserve the legacy user-speaking animation behavior.
-          const rowMidPoint = Math.floor(rowCount / 2)
-          const volumeChunks = 1 / (rowMidPoint + 1)
-          const distanceToMid = Math.abs(rowMidPoint - row)
-          const threshold = distanceToMid * volumeChunks
-          isHighlighted = (volumeBands[i % columnCount] ?? 0) >= threshold
+          const columnEnergy = volumeBands[col] ?? 0
+          const resonance = Math.max(0.22, 1 - columnDistance * 0.58)
+          const energy = Math.max(0, Math.min(1, columnEnergy * (0.88 + resonance * 0.34)))
+          const threshold = Math.max(0.08, rowDistance * 0.72 + columnDistance * 0.2)
+          isHighlighted = energy >= threshold
         } else if (gridState === "speaking") {
-          // Keep speaking visual tied to audio bands (like listening), but smoother
-          // and fuller with a gentle traveling wave accent.
-          const rowMidPoint = Math.floor(rowCount / 2)
-          const col = i % columnCount
           const bandLevel = volumeBands[col] ?? 0
-          const distanceToMid = Math.abs(rowMidPoint - row)
-          const rowFalloff = distanceToMid / Math.max(1, rowMidPoint)
 
           const wavePhase = waveTick * SPEAKING_WAVE_SPEED - col * 0.65 - row * 0.4
           const waveBoost = ((Math.sin(wavePhase) + 1) / 2) * 0.16
-          const energy = Math.max(0, Math.min(1, bandLevel + waveBoost))
+          const resonance = Math.max(0.2, 1 - columnDistance * 0.62)
+          const energy = Math.max(
+            0,
+            Math.min(1, bandLevel * (0.9 + resonance * 0.36) + waveBoost),
+          )
 
-          // Audio-first fill logic: rows near center fill earlier, outer rows with higher energy.
-          const threshold = Math.max(0.06, rowFalloff * 0.78)
+          const threshold = Math.max(0.08, rowDistance * 0.7 + columnDistance * 0.18)
           isHighlighted = energy >= threshold
           transitionDuration = Math.max(0.09, interval / 1200)
         } else {

@@ -11,32 +11,32 @@ def default_route_targets(llm_engine_id: str | None = None) -> tuple[RouteTarget
     return (
         RouteTarget(
             llm_engine_id=engine_id,
-            provider="digitalocean-oss",
-            model="openai-gpt-oss-120b",
+            provider="local-openai",
+            model="gpt-5.4-mini",
             profile_id="trivial_route",
         ),
         RouteTarget(
             llm_engine_id=engine_id,
-            provider="digitalocean-oss",
-            model="openai-gpt-oss-120b",
+            provider="local-openai",
+            model="gpt-5.4-mini",
             profile_id="simple_route",
         ),
         RouteTarget(
             llm_engine_id=engine_id,
-            provider="digitalocean-oss",
-            model="openai-gpt-oss-120b",
+            provider="local-openai",
+            model="gpt-5.4-mini",
             profile_id="moderate_route",
         ),
         RouteTarget(
             llm_engine_id=engine_id,
-            provider="digitalocean-oss",
-            model="openai-gpt-oss-120b",
+            provider="local-openai",
+            model="gpt-5.4-mini",
             profile_id="complex_route",
         ),
         RouteTarget(
             llm_engine_id=engine_id,
-            provider="digitalocean-oss",
-            model="openai-gpt-oss-120b",
+            provider="local-openai",
+            model="gpt-5.4-mini",
             profile_id="expert_route",
         ),
     )

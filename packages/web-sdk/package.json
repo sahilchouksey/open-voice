@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Web client SDK for the Open Voice realtime runtime.",
   "scripts": {
+    "test": "bun test",
     "smoke": "bun run examples/runtime-smoke.ts",
     "demo": "vite --config ../../demos/frontend/vite.config.ts",
     "demo:build": "vite build --config ../../demos/frontend/vite.config.ts",

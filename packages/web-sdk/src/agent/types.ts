@@ -107,6 +107,16 @@ export interface VoiceAgentThinkingSignal extends VoiceAgentSignalBase {
   delta: string
 }
 
+export interface VoiceAgentToolSignal extends VoiceAgentSignalBase {
+  type: "assistant.tool"
+  toolName: string
+  status: string | null
+  summary: string | null
+  spokenHint: string | null
+  turnId: string | null
+  generationId: string | null
+}
+
 export interface VoiceAgentLlmPhaseSignal extends VoiceAgentSignalBase {
   type: "assistant.phase"
   phase: "thinking" | "generating" | "done"
@@ -180,6 +190,7 @@ export type VoiceAgentSignal =
   | VoiceAgentRouteSignal
   | VoiceAgentQueueSignal
   | VoiceAgentThinkingSignal
+  | VoiceAgentToolSignal
   | VoiceAgentResponseDeltaSignal
   | VoiceAgentResponseFinalSignal
   | VoiceAgentLlmErrorSignal

@@ -62,6 +62,10 @@ class SessionWorkerRuntimeState:
     queued_utterances: list[QueuedUtterance] = field(default_factory=list)
     current_trace: TurnTrace | None = None
     turn_detection: TurnDetectionConfig = field(default_factory=TurnDetectionConfig)
+    tool_speech_announcements: dict[tuple[str, str], float] = field(default_factory=dict)
+    tool_search_statuses: dict[str, str] = field(default_factory=dict)
+    tool_search_start_announced: bool = False
+    tool_search_end_announced: bool = False
 
 
 from open_voice_runtime.session_worker.input_buffer import BufferedUtterance

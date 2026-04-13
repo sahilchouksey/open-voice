@@ -43,27 +43,79 @@ class OutputStreamer:
             metadata={"text_segment": text},
         )
         stream = await self._tts_service.stream(request, engine_id=engine_id)
-        raw_events: list[TtsEvent] = []
         first_chunk_at: float | None = None
+        events: list[ConversationEvent] = []
+        speaking_emitted = False
         async for item in stream:
-            raw_events.append(item)
-            if first_chunk_at is None and item.kind is TtsEventKind.AUDIO_CHUNK:
-                first_chunk_at = monotonic()
+            if item.kind is TtsEventKind.AUDIO_CHUNK and item.audio_chunk is not None:
+                if first_chunk_at is None:
+                    first_chunk_at = monotonic()
+                if not speaking_emitted:
+                    speaking_event = SessionStatusEvent(
+                        state.session_id,
+                        SessionStatus.SPEAKING,
+                        turn_id=turn_id,
+                        reason="tts.generating",
+                    )
+                    speaking_event.generation_id = generation_id
+                    speaking_emitted = True
+                    if emit is not None:
+                        await emit(speaking_event)
+                    else:
+                        events.append(speaking_event)
 
-        events: list[ConversationEvent] = [
-            SessionStatusEvent(
+            conversation_event = _conversation_event_from_tts_event(
                 state.session_id,
-                SessionStatus.SPEAKING,
-                turn_id=turn_id,
-                reason="tts.generating",
-            ),
-            *_conversation_events_from_tts(state.session_id, turn_id, text, raw_events),
-        ]
-        _set_generation_for_events(events, generation_id)
-        if emit is not None:
-            await _emit_conversation_events(emit, events)
-            return [], first_chunk_at
+                turn_id,
+                text,
+                item,
+            )
+            if conversation_event is None:
+                continue
+            conversation_event.generation_id = generation_id
+            if emit is not None:
+                await emit(conversation_event)
+            else:
+                events.append(conversation_event)
+
         return events, first_chunk_at
+
+    async def stream_feedback_text(
+        self,
+        state: SessionState,
+        *,
+        turn_id: str | None,
+        text: str,
+        generation_id: str | None,
+        emit: ConversationEventEmitter,
+    ) -> None:
+        if self._tts_service is None or not text.strip():
+            return
+        engine_id = state.engine_selection.tts
+        if not self._tts_service.is_available(engine_id):
+            return
+
+        request = TtsRequest(
+            session_id=state.session_id,
+            turn_id=turn_id or "",
+            text=text,
+            audio_format=_tts_audio_format(state),
+            voice_id=_tts_voice_id(state),
+            language=_session_language(state),
+            metadata={"text_segment": text},
+        )
+        stream = await self._tts_service.stream(request, engine_id=engine_id)
+        async for item in stream:
+            conversation_event = _conversation_event_from_tts_event(
+                state.session_id,
+                turn_id,
+                text,
+                item,
+            )
+            if conversation_event is None:
+                continue
+            conversation_event.generation_id = generation_id
+            await emit(conversation_event)
 
 
 def _conversation_events_from_tts(
@@ -88,6 +140,24 @@ def _conversation_events_from_tts(
                 TtsCompletedEvent(session_id, turn_id=turn_id, duration_ms=item.duration_ms)
             )
     return events
+
+
+def _conversation_event_from_tts_event(
+    session_id: str,
+    turn_id: str | None,
+    speech_text: str,
+    item: TtsEvent,
+) -> ConversationEvent | None:
+    if item.kind is TtsEventKind.AUDIO_CHUNK and item.audio_chunk is not None:
+        return TtsChunkEvent(
+            session_id,
+            item.audio_chunk,
+            turn_id=turn_id,
+            text_segment=item.text_segment or speech_text,
+        )
+    if item.kind is TtsEventKind.COMPLETED:
+        return TtsCompletedEvent(session_id, turn_id=turn_id, duration_ms=item.duration_ms)
+    return None
 
 
 async def _emit_conversation_events(

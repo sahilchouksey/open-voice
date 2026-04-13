@@ -12,6 +12,7 @@ import type {
   VoiceAgentSignal,
   VoiceAgentSignalListener,
 } from "./types"
+import { buildToolUpdatePresentation } from "./tool_updates"
 import type { WebVoiceSession } from "../session"
 
 function noop(): void {
@@ -368,6 +369,22 @@ export class VoiceAgent {
       this.emitSignal({
         type: "assistant.thinking",
         delta: event.delta ?? "",
+        timestampMs: now,
+        sessionId,
+      })
+      return
+    }
+
+    if (event.type === "llm.tool.update") {
+      const presentation = buildToolUpdatePresentation(event)
+      this.emitSignal({
+        type: "assistant.tool",
+        toolName: event.tool_name,
+        status: event.status ?? null,
+        summary: presentation.summary,
+        spokenHint: presentation.spokenHint,
+        turnId: event.turn_id ?? null,
+        generationId: event.generation_id ?? null,
         timestampMs: now,
         sessionId,
       })

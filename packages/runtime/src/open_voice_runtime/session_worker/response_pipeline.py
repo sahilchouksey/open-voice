@@ -33,6 +33,7 @@ from open_voice_runtime.session.models import SessionState
 
 
 ConversationEventEmitter = Callable[[ConversationEvent], Awaitable[None]]
+LlmEventObserver = Callable[[LlmEvent], Awaitable[None]]
 
 
 class ResponsePipeline:
@@ -103,6 +104,7 @@ class ResponsePipeline:
         decision: RouteDecision | None,
         generation_id: str | None,
         emit: ConversationEventEmitter | None = None,
+        on_llm_event: LlmEventObserver | None = None,
     ) -> tuple[list[ConversationEvent], str | None, float | None]:
         if decision is None or self._llm_service is None:
             return [], None, None
@@ -133,6 +135,8 @@ class ResponsePipeline:
         try:
             stream = self._llm_service.stream(request, engine_id=engine_id)
             async for item in stream:
+                if on_llm_event is not None:
+                    await on_llm_event(item)
                 llm_raw.append(item)
                 if first_delta_at is None and item.text:
                     first_delta_at = monotonic()

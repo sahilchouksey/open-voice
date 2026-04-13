@@ -35,17 +35,17 @@ The base `.env` contains shared non-secret defaults and route targets.
 
 ```json
 [
-  {"llm_engine_id":"opencode","provider":"digitalocean-oss","model":"openai-gpt-oss-120b","profile_id":"trivial_route"},
-  {"llm_engine_id":"opencode","provider":"digitalocean-oss","model":"openai-gpt-oss-120b","profile_id":"simple_route"},
-  {"llm_engine_id":"opencode","provider":"digitalocean-oss","model":"openai-gpt-oss-120b","profile_id":"moderate_route"},
-  {"llm_engine_id":"opencode","provider":"digitalocean-oss","model":"openai-gpt-oss-120b","profile_id":"complex_route"},
-  {"llm_engine_id":"opencode","provider":"digitalocean-oss","model":"openai-gpt-oss-120b","profile_id":"expert_route"}
+  {"llm_engine_id":"opencode","provider":"local-openai","model":"gpt-5.4-mini","profile_id":"trivial_route"},
+  {"llm_engine_id":"opencode","provider":"local-openai","model":"gpt-5.4-mini","profile_id":"simple_route"},
+  {"llm_engine_id":"opencode","provider":"local-openai","model":"gpt-5.4-mini","profile_id":"moderate_route"},
+  {"llm_engine_id":"opencode","provider":"local-openai","model":"gpt-5.4-mini","profile_id":"complex_route"},
+  {"llm_engine_id":"opencode","provider":"local-openai","model":"gpt-5.4-mini","profile_id":"expert_route"}
 ]
 ```
 
 Each entry has:
 - `llm_engine_id` — engine to use (`"opencode"`)
-- `provider` — LLM provider (`"digitalocean-oss"`, `"copilot-proxy"`, etc.)
+- `provider` — LLM provider (`"local-openai"`, `"copilot-proxy"`, etc.)
 - `model` — model name (provider-specific)
 - `profile_id` — route tier name (used by the router to select a model)
 
@@ -67,11 +67,11 @@ Place your machine-specific settings here. This file is **gitignored** and takes
 | `PARAKEET_DEVICE` | Device for Parakeet STT engine (`cuda` or `cpu`) | `cuda` |
 | `VITE_OPEN_VOICE_FRONTEND_DIAGNOSTICS` | Enable frontend diagnostics tracing | `0` |
 
-**Example `.env.local` (GitHub Copilot Proxy setup):**
+**Example `.env.local` (Local OpenAI proxy setup):**
 
 ```bash
-# Use local GitHub Copilot proxy with free models
-OPEN_VOICE_ROUTE_TARGETS='[{"llm_engine_id":"opencode","provider":"copilot-proxy","model":"gpt-4.1","profile_id":"trivial_route"},{"llm_engine_id":"opencode","provider":"copilot-proxy","model":"gpt-4o","profile_id":"simple_route"},{"llm_engine_id":"opencode","provider":"copilot-proxy","model":"gpt-4o-mini","profile_id":"moderate_route"},{"llm_engine_id":"opencode","provider":"copilot-proxy","model":"claude-sonnet-4","profile_id":"complex_route"},{"llm_engine_id":"opencode","provider":"copilot-proxy","model":"gpt-5-mini","profile_id":"expert_route"}]'
+# Use local OpenAI-compatible proxy for all route tiers
+OPEN_VOICE_ROUTE_TARGETS='[{"llm_engine_id":"opencode","provider":"local-openai","model":"gpt-5.4-mini","profile_id":"trivial_route"},{"llm_engine_id":"opencode","provider":"local-openai","model":"gpt-5.4-mini","profile_id":"simple_route"},{"llm_engine_id":"opencode","provider":"local-openai","model":"gpt-5.4-mini","profile_id":"moderate_route"},{"llm_engine_id":"opencode","provider":"local-openai","model":"gpt-5.4-mini","profile_id":"complex_route"},{"llm_engine_id":"opencode","provider":"local-openai","model":"gpt-5.4-mini","profile_id":"expert_route"}]'
 
 # Opencode config directory
 OPEN_VOICE_OPENCODE_DIRECTORY=/path/to/repo

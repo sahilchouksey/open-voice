@@ -61,6 +61,7 @@ from open_voice_runtime.tts.contracts import (
     TtsRequest,
     TtsResult,
 )
+from open_voice_runtime.audio.types import AudioChunk, AudioEncoding, AudioFormat
 from open_voice_runtime.tts.registry import TtsEngineRegistry
 from open_voice_runtime.audio.types import AudioFormat, AudioEncoding
 
@@ -244,7 +245,16 @@ class FakeTtsEngine(BaseTtsEngine):
         async def _generator():
             yield TtsEvent(
                 kind=TtsEventKind.AUDIO_CHUNK,
-                audio_chunk=None,
+                audio_chunk=AudioChunk(
+                    data=b"\x00\x00",
+                    format=AudioFormat(
+                        sample_rate_hz=24000,
+                        channels=1,
+                        encoding=AudioEncoding.PCM_S16LE,
+                    ),
+                    sequence=0,
+                    duration_ms=100.0,
+                ),
                 text_segment=request.text,
             )
             yield TtsEvent(kind=TtsEventKind.COMPLETED, duration_ms=100.0)

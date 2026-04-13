@@ -44,6 +44,7 @@ from open_voice_runtime.session_worker.state import (
     TurnTrace,
 )
 from open_voice_runtime.session_worker.transcription import TranscriptionCoordinator
+from open_voice_runtime.llm.contracts import LlmEvent, LlmEventKind
 from open_voice_runtime.transport.websocket.protocol import (
     AgentGenerateReplyMessage,
     AgentSayMessage,
@@ -420,6 +421,15 @@ class SessionWorker:
             decision=decision,
             generation_id=generation_id,
             emit=emit,
+            on_llm_event=(
+                (
+                    lambda item: self._handle_llm_event_for_feedback(
+                        item, turn_id, generation_id, emit
+                    )
+                )
+                if emit is not None and generation_id is not None
+                else None
+            ),
         )
         if trace is not None:
             trace.llm_started_at = trace.route_selected_at or monotonic()
@@ -538,6 +548,12 @@ class SessionWorker:
                 decision=decision,
                 generation_id=generation_id,
                 emit=emit,
+                on_llm_event=lambda item: self._handle_llm_event_for_feedback(
+                    item,
+                    turn_id,
+                    generation_id,
+                    emit,
+                ),
             )
             trace = self._runtime.current_trace
             if trace is not None:
@@ -744,6 +760,95 @@ class SessionWorker:
 
     def _has_active_response(self) -> bool:
         return self._runtime.response_task is not None and not self._runtime.response_task.done()
+
+    async def _handle_llm_event_for_feedback(
+        self,
+        item: LlmEvent,
+        turn_id: str | None,
+        generation_id: str | None,
+        emit: ConversationEventEmitter,
+    ) -> None:
+        hint = self._tool_progress_speech_hint(item)
+        if not hint or generation_id is None:
+            return
+        await self._output_streamer.stream_feedback_text(
+            self._state,
+            turn_id=turn_id,
+            text=hint,
+            generation_id=generation_id,
+            emit=emit,
+        )
+
+    def _tool_progress_speech_hint(self, item: LlmEvent) -> str | None:
+        if item.kind is not LlmEventKind.TOOL_UPDATE:
+            return None
+
+        status_raw = item.metadata.get("status") if isinstance(item.metadata, dict) else None
+        status = status_raw.lower() if isinstance(status_raw, str) else ""
+        if status in {"pending", "running"}:
+            status_bucket = "start"
+        elif status in {"completed", "done"}:
+            status_bucket = "end"
+        elif status in {"error", "failed"}:
+            status_bucket = "error"
+        else:
+            return None
+
+        call_id = item.call_id or item.tool_name or "tool"
+        dedup_key = (call_id, status_bucket)
+        now = asyncio.get_running_loop().time()
+
+        stale = [
+            key
+            for key, seen_at in self._runtime.tool_speech_announcements.items()
+            if now - seen_at > 10.0
+        ]
+        for key in stale:
+            self._runtime.tool_speech_announcements.pop(key, None)
+
+        if dedup_key in self._runtime.tool_speech_announcements:
+            return None
+        self._runtime.tool_speech_announcements[dedup_key] = now
+
+        tool_name = (item.tool_name or "").lower()
+        is_search = "search" in tool_name or "web" in tool_name
+
+        if is_search:
+            call_key = (
+                item.call_id
+                or f"{tool_name or 'tool'}:{len(self._runtime.tool_speech_announcements)}"
+            )
+            self._runtime.tool_search_statuses[call_key] = status_bucket
+
+            if status_bucket == "start":
+                if not self._runtime.tool_search_start_announced:
+                    self._runtime.tool_search_start_announced = True
+                    self._runtime.tool_search_end_announced = False
+                    return "I am checking a few web sources now."
+                return None
+
+            if status_bucket in {"end", "error"}:
+                if not self._runtime.tool_search_start_announced:
+                    return None
+                terminal = {"end", "error"}
+                all_terminal = bool(self._runtime.tool_search_statuses) and all(
+                    value in terminal for value in self._runtime.tool_search_statuses.values()
+                )
+                if all_terminal and not self._runtime.tool_search_end_announced:
+                    self._runtime.tool_search_end_announced = True
+                    source_count = len(self._runtime.tool_search_statuses)
+                    if source_count > 1:
+                        return f"I finished checking {source_count} web sources."
+                    return "I finished checking the web source."
+                return None
+
+        if status_bucket == "start":
+            return "Searching the web now." if is_search else "I am checking that now."
+        if status_bucket == "end":
+            return "Web search is complete." if is_search else "That check is complete."
+        if status_bucket == "error":
+            return "I hit an issue while checking that."
+        return None
 
 
 def _turn_queue_policy(state: SessionState) -> str:

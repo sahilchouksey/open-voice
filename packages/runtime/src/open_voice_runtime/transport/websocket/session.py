@@ -3712,8 +3712,8 @@ def _fallback_route_target(state: SessionState, config: RuntimeConfig) -> RouteT
     if state.engine_selection.llm in {None, "opencode"}:
         return RouteTarget(
             llm_engine_id="opencode",
-            provider="opencode",
-            model="minimax-m2.5-free",
+            provider="local-openai",
+            model="gpt-5.4-mini",
             profile_id="moderate_route",
         )
     return None
@@ -4302,8 +4302,8 @@ def _fallback_route_target(state: SessionState, config: RuntimeConfig) -> RouteT
     if state.engine_selection.llm in {None, "opencode"}:
         return RouteTarget(
             llm_engine_id="opencode",
-            provider="opencode",
-            model="minimax-m2.5-free",
+            provider="local-openai",
+            model="gpt-5.4-mini",
             profile_id="moderate_route",
         )
     return None
