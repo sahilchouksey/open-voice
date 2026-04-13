@@ -62,13 +62,6 @@ export interface VoiceAgentPendingTurnSignal extends VoiceAgentSignalBase {
   clientTurnId: string | null
 }
 
-export interface VoiceAgentSttPartialSignal extends VoiceAgentSignalBase {
-  type: "stt.partial"
-  text: string
-  turnId: string | null
-  generationId: string | null
-}
-
 export interface VoiceAgentVadSignal extends VoiceAgentSignalBase {
   type: "vad.state"
   kind: "start_of_speech" | "end_of_speech" | "inference"
@@ -181,7 +174,6 @@ export type VoiceAgentSignal =
   | VoiceAgentTurnPhaseSignal
   | VoiceAgentPendingTurnSignal
   | VoiceAgentVadSignal
-  | VoiceAgentSttPartialSignal
   | VoiceAgentSttFinalSignal
   | VoiceAgentSttProgressSignal
   | VoiceAgentLlmPhaseSignal

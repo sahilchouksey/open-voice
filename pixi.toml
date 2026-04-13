@@ -1,0 +1,26 @@
+[workspace]
+name = "open-voice"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+python = "3.11.*"
+pip = ">=24"
+
+[pypi-dependencies]
+open-voice-runtime = { path = "packages/runtime", editable = true }
+fastapi = ">=0.115"
+httpx = ">=0.28"
+uvicorn = ">=0.34"
+websockets = ">=15.0"
+moonshine-voice = "==0.0.49"
+torch = ">=2.10"
+torchaudio = ">=2.10"
+onnxruntime = ">=1.22"
+numpy = ">=2.1"
+silero-vad = ">=6.2.1"
+kokoro-onnx = ">=0.5.0"
+
+[tasks]
+demo-backend = "python demos/backend/run.py"
+runtime-tests = 'PYTHONPATH="packages/runtime/src" pytest packages/runtime/tests -q'

@@ -3,11 +3,12 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from open_voice_runtime.app.asgi import create_asgi_app
+from open_voice_runtime.app.config import RuntimeConfig
 from open_voice_runtime.app.server import RuntimeServer
+from open_voice_runtime.session_worker.host import WorkerHost
 from open_voice_runtime.session.manager import InMemorySessionManager
 from open_voice_runtime.session.models import EngineSelection, SessionCreateRequest
 from open_voice_runtime.transport.websocket.handler import RealtimeConnectionHandler
-from open_voice_runtime.transport.websocket.session import RealtimeConversationSession
 
 
 def test_list_sessions_returns_recent_first_with_summary_fields() -> None:
@@ -110,8 +111,8 @@ def _create_session_with_turn(
 
 
 def _server_for_tests(session_manager: InMemorySessionManager) -> RuntimeServer:
-    realtime_session = RealtimeConversationSession(session_manager)
-    handler = RealtimeConnectionHandler(realtime_session)
+    worker_host = WorkerHost(session_manager, RuntimeConfig())
+    handler = RealtimeConnectionHandler(worker_host)
 
     class _NoopTraceSink:
         enabled = False

@@ -323,18 +323,6 @@ export class VoiceAgent {
     const sessionId = state.sessionId
     const now = Date.now()
 
-    if (event.type === "stt.partial") {
-      this.emitSignal({
-        type: "stt.partial",
-        text: event.text,
-        turnId: event.turn_id ?? null,
-        generationId: event.generation_id ?? null,
-        timestampMs: now,
-        sessionId,
-      })
-      return
-    }
-
     if (event.type === "vad.state") {
       this.emitSignal({
         type: "vad.state",

@@ -27,7 +27,6 @@ from open_voice_runtime.conversation.events import (
     SessionReadyEvent,
     SessionStatusEvent,
     SttFinalEvent,
-    SttPartialEvent,
     TurnAcceptedEvent,
     TurnMetricsEvent,
     TurnQueuedEvent,
@@ -69,6 +68,7 @@ from open_voice_runtime.transport.websocket.codec import (
     parse_client_message,
     serialize_conversation_event,
 )
+from open_voice_runtime.session_worker.host import WorkerHost
 from open_voice_runtime.transport.websocket.protocol import (
     AgentGenerateReplyMessage,
     AgentSayMessage,
@@ -144,7 +144,7 @@ ConversationEventEmitter = Callable[[ConversationEvent], Awaitable[None]]
 SerializedEventEmitter = Callable[[dict[str, Any]], Awaitable[None]]
 
 
-class RealtimeConversationSession:
+class _LegacyRealtimeConversationSession:
     def __init__(
         self,
         sessions: SessionManager,
@@ -213,6 +213,15 @@ class RealtimeConversationSession:
         self._tool_search_statuses: dict[str, dict[str, str]] = {}
         self._tool_search_start_announced: dict[str, bool] = {}
         self._tool_search_end_announced: dict[str, bool] = {}
+        self._worker_host = WorkerHost(
+            sessions,
+            config=self._config,
+            stt_service=stt_service,
+            vad_service=vad_service,
+            router_service=router_service,
+            llm_service=llm_service,
+            tts_service=tts_service,
+        )
 
     async def apply(
         self,
@@ -220,34 +229,7 @@ class RealtimeConversationSession:
         *,
         emit: SerializedEventEmitter | None = None,
     ) -> list[dict[str, Any]]:
-        session_id = _session_id_from_payload(payload)
-
-        async def emit_event(event: ConversationEvent) -> None:
-            if emit is None:
-                return
-            await emit(serialize_conversation_event(event))
-
-        try:
-            message = parse_client_message(payload)
-            events = await self.apply_message(
-                message,
-                emit=emit_event if emit is not None else None,
-            )
-        except OpenVoiceError as error:
-            if session_id is None:
-                raise
-            error_event = ErrorEvent(session_id, error)
-            if emit is not None:
-                await emit_event(error_event)
-                return []
-            events = [error_event]
-
-        if emit is not None:
-            for event in events:
-                await emit_event(event)
-            return []
-
-        return [serialize_conversation_event(event) for event in events]
+        return await self._worker_host.apply(payload, emit=emit)
 
     async def apply_message(
         self,
@@ -255,27 +237,7 @@ class RealtimeConversationSession:
         *,
         emit: ConversationEventEmitter | None = None,
     ) -> list[ConversationEvent]:
-        if isinstance(message, SessionStartMessage):
-            return await self._start_session(message)
-        if isinstance(message, AudioAppendMessage):
-            return await self._append_audio(message, emit=emit)
-        if isinstance(message, AudioCommitMessage):
-            return await self._commit_audio(message, emit=emit)
-        if isinstance(message, UserTurnCommitMessage):
-            return await self._commit_user_turn(message, emit=emit)
-        if isinstance(message, AgentSayMessage):
-            return await self._agent_say(message, emit=emit)
-        if isinstance(message, AgentGenerateReplyMessage):
-            return await self._agent_generate_reply(message, emit=emit)
-        if isinstance(message, ConversationInterruptMessage):
-            return await self._interrupt(message)
-        if isinstance(message, EngineSelectMessage):
-            return await self._select_engines(message)
-        if isinstance(message, ConfigUpdateMessage):
-            return await self._update_config(message)
-        if isinstance(message, SessionCloseMessage):
-            return await self._close_session(message)
-        raise TransportProtocolError("Unsupported realtime client message instance.")
+        return await self._worker_host.apply_message(message, emit=emit)
 
     async def _start_session(self, message: SessionStartMessage) -> list[ConversationEvent]:
         created = False
@@ -297,7 +259,6 @@ class RealtimeConversationSession:
             state.touch()
 
         self._turns.buffer_for(state.session_id)
-        await self._ensure_stt_stream(state)
 
         events: list[ConversationEvent] = []
         if created:
@@ -3640,6 +3601,55 @@ class RealtimeConversationSession:
         return _assistant_text(llm_events), first_llm_delta_at, first_tts_chunk_at
 
 
+class RealtimeConversationSession:
+    """Thin compatibility wrapper around the worker-centered runtime path.
+
+    The previous monolithic realtime session implementation has been retired
+    from the active execution path. The active runtime now delegates to
+    ``WorkerHost`` / ``SessionWorker`` for all message handling.
+
+    The legacy implementation remains in this module only as historical
+    reference during migration and should not be used for new behavior.
+    """
+
+    def __init__(
+        self,
+        sessions: SessionManager,
+        *,
+        config: RuntimeConfig | None = None,
+        stt_service: SttService | None = None,
+        vad_service: VadService | None = None,
+        router_service: RouterService | None = None,
+        llm_service: LlmService | None = None,
+        tts_service: TtsService | None = None,
+    ) -> None:
+        self._worker_host = WorkerHost(
+            sessions,
+            config=config or RuntimeConfig(),
+            stt_service=stt_service,
+            vad_service=vad_service,
+            router_service=router_service,
+            llm_service=llm_service,
+            tts_service=tts_service,
+        )
+
+    async def apply(
+        self,
+        payload: dict[str, Any],
+        *,
+        emit: SerializedEventEmitter | None = None,
+    ) -> list[dict[str, Any]]:
+        return await self._worker_host.apply(payload, emit=emit)
+
+    async def apply_message(
+        self,
+        message: ClientMessage,
+        *,
+        emit: ConversationEventEmitter | None = None,
+    ) -> list[ConversationEvent]:
+        return await self._worker_host.apply_message(message, emit=emit)
+
+
 def _merge_engine_selection(current: EngineSelection, update: EngineSelection) -> EngineSelection:
     return EngineSelection(
         stt=update.stt or current.stt,
@@ -3786,16 +3796,7 @@ def _conversation_events_from_stt(
     events: list[ConversationEvent] = []
     final_by_sequence: dict[int, str] = {}
     for item in stt_events:
-        if item.kind is SttEventKind.PARTIAL:
-            partial_event = SttPartialEvent(
-                session_id,
-                item.text,
-                turn_id=turn_id,
-                confidence=item.confidence,
-            )
-            partial_event.generation_id = generation_id
-            events.append(partial_event)
-        elif item.kind is SttEventKind.FINAL:
+        if item.kind is SttEventKind.FINAL:
             text = item.text.strip()
             if text:
                 final_by_sequence[item.sequence] = text
@@ -4026,10 +4027,14 @@ def _extract_stable_speech_segments(
     for delimiter in ".!?;":
         while delimiter in remaining:
             idx = remaining.index(delimiter)
-            segment = remaining[: idx + 1].strip()
+            # Absorb trailing closing quotes/brackets after delimiter
+            end_idx = idx + 1
+            while end_idx < len(remaining) and remaining[end_idx] in "\"')]}":
+                end_idx += 1
+            segment = remaining[:end_idx].strip()
             if segment:
                 segments.append(segment)
-            remaining = remaining[idx + 1 :]
+            remaining = remaining[end_idx:]
     if flush_incomplete:
         remaining = remaining.strip()
         if remaining:

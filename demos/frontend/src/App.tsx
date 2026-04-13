@@ -12,7 +12,6 @@ import {
   selectCurrentSpokenSegment,
   selectTranscript,
   selectTurnPhase,
-  SttTrackStateManager,
   toRuntimeConfigPayload,
   toSetTranscriptAction,
   computeAnalyserBands,
@@ -25,6 +24,7 @@ import {
   type VoiceAgentSignal,
   type TranscriptEntry,
 } from "@open-voice/web-sdk"
+import { WebVoiceSession as WebVoiceSessionClass } from "@open-voice/web-sdk"
 import { Button, Card, Input, Label, Select, TabsList, TabsTrigger } from "./components/ui"
 import { GridVisualizer } from "./components/GridVisualizer"
 import thinkingCueUrl from "../../../packages/web-sdk/examples/assets/sfx/achievement-fx.wav?url"
@@ -361,7 +361,7 @@ class DemoMicInput {
     }) => void,
   ) {
     this.mic = new SdkBrowserMicInput({
-      sampleRateHz: 24000,
+      sampleRateHz: 16000,
       channels: 1,
       chunkSize: DEMO_CAPTURE_BUFFER_SIZE,
       analyserBandCount: AUDIO_BAND_COUNT,
@@ -396,7 +396,7 @@ class DemoMicInput {
       await this.sendChunk({
         data: chunk.data,
         sequence: chunk.sequence,
-        encoding: chunk.encoding,
+        encoding: "pcm_s16le",
         sampleRateHz: chunk.sampleRateHz,
         channels: chunk.channels,
         durationMs: chunk.durationMs ?? 0,
@@ -1030,7 +1030,6 @@ export function App() {
   const requestedSessionLoadAttemptRef = useRef<string | null>(null)
   const turnPhaseLastSetAtRef = useRef(0)
   const turnPhaseStickyUntilRef = useRef(0)
-  const sttTrackStateRef = useRef(new SttTrackStateManager())
   const localBargeInFramesRef = useRef(0)
   const localBargeInCooldownUntilRef = useRef(0)
   const localBargeInNoiseFloorRef = useRef(0)
@@ -1881,8 +1880,6 @@ export function App() {
     activeGenerationIdRef.current = null
     pendingSpeechAfterThinkingRef.current = false
     setPendingSpeechAfterThinking(false)
-    sttTrackStateRef.current.reset()
-
     llmThinkingUiTextRef.current = ""
     llmResponseTextRef.current = ""
     clearLlmThinkingUiTimer()
@@ -2067,7 +2064,6 @@ export function App() {
         ) {
           clearGenerationWatchdog()
           activeGenerationIdRef.current = null
-          sttTrackStateRef.current.reset()
         }
         // Auto-start mic in free-mic mode when returning to listening
         const micStale = isMicCaptureStale()
@@ -2165,10 +2161,8 @@ export function App() {
       suppressTtsUntilNextUserFinalRef.current = false
       resetAssistantPanels(signal.turnId)
       interruptionInFlightRef.current = false
-      if (signal.text.trim()) {
-        lastUserSpeechAtRef.current = Date.now()
-        allowAutoInterruptUntilRef.current = 0
-      }
+      const now = Date.now()
+      const hadRecentUserSpeechEvidence = now - lastUserSpeechAtRef.current <= 1800
       const hasSpeechLikeFinal = signal.text.trim().length > 0 && !isLikelyNoisePartial(signal.text)
       const agentCurrentlySpeaking =
         turnPhaseRef.current === "agent_speaking"
@@ -2178,10 +2172,15 @@ export function App() {
       if (
         effectiveQueuePolicy === "send_now"
         && hasSpeechLikeFinal
+        && hadRecentUserSpeechEvidence
         && agentCurrentlySpeaking
         && !interruptionInFlightRef.current
       ) {
         triggerImmediateInterrupt("stt_final")
+      }
+      if (signal.text.trim()) {
+        lastUserSpeechAtRef.current = now
+        allowAutoInterruptUntilRef.current = 0
       }
       queueSttUiText(signal.text || "", true)
       setTurnPhaseStable("processing")
@@ -2203,7 +2202,7 @@ export function App() {
       const speechStartDetected = signal.kind === "start_of_speech" || confidentInferenceSpeech
       if (speechStartDetected) {
         allowAutoInterruptUntilRef.current = Date.now() + 700
-        if (shouldAutoBargeInterrupt && DEMO_ENABLE_VAD_AUTO_INTERRUPT && DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT && interruptionPolicyRef.current.shouldInterruptFromVad({ type: "vad.state", kind: signal.kind, speaking: signal.speaking ?? false, probability: signal.probability ?? undefined })) {
+        if (shouldAutoBargeInterrupt && DEMO_ENABLE_VAD_AUTO_INTERRUPT && DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT && interruptionPolicyRef.current.shouldInterruptFromVad({ type: "vad.state", session_id: sessionRef.current?.sessionId ?? "", event_id: "ui-vad", timestamp: new Date().toISOString(), sequence: 0, kind: signal.kind, speaking: signal.speaking ?? false, probability: signal.probability ?? undefined })) {
           triggerImmediateInterrupt("vad")
         }
         // Allow user_speaking even during interruption or when session is thinking
@@ -2239,42 +2238,6 @@ export function App() {
           return (micRef.current ? "listening" : "idle") as TurnPhase
         })()
         setTurnPhaseStable(nextPhase)
-      }
-      return
-    }
-    if (signal.type === "stt.partial") {
-      const partialTurnId = signal.turnId
-      const partialGenerationId = signal.generationId
-      const sendNowRelaxedRotation = effectiveQueuePolicy === "send_now"
-      const canRotateSttTrack = pendingTurnPhase === "idle" && (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready") && !ttsPlayingRef.current && !ttsStreamActiveRef.current && !llmThinkingActiveRef.current
-      const trackAccepted = sttTrackStateRef.current.checkAndUpdate(partialTurnId, partialGenerationId, { canRotate: canRotateSttTrack, relaxedRotation: sendNowRelaxedRotation })
-      if (!trackAccepted) {
-        return
-      }
-      const partialText = signal.text || ""
-      const speechLikePartial = !isLikelyNoisePartial(partialText)
-      if (speechLikePartial) {
-        queueSttUiText(partialText)
-      }
-      const hasPartialText = partialText.trim().length > 0
-      if (hasPartialText && speechLikePartial) {
-        lastUserSpeechAtRef.current = Date.now()
-        if (!vadSpeechStartedAtRef.current) {
-          vadSpeechStartedAtRef.current = Date.now()
-        }
-      }
-      const canRenderUserSpeech = micRef.current && (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready")
-      const agentCurrentlySpeaking = turnPhaseRef.current === "agent_speaking" || sessionStatusRef.current === "speaking" || ttsPlayingRef.current || ttsStreamActiveRef.current
-      if (agentCurrentlySpeaking && isLikelyAssistantEcho(partialText, llmResponseTextRef.current)) {
-        return
-      }
-      const shouldAutoBargeInterrupt = effectiveQueuePolicy === "send_now"
-      if (speechLikePartial && shouldAutoBargeInterrupt && DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT && (ttsPlayingRef.current || ttsStreamActiveRef.current) && !interruptionInFlightRef.current && interruptionPolicyRef.current.shouldInterruptFromPartial(partialText)) {
-        pushTraceLocal("ui.auto_interrupt.stt_partial_candidate", { session_id: sessionRef.current?.sessionId ?? null, text: partialText }, "ui.action")
-        triggerImmediateInterrupt("stt_partial")
-      }
-      if (hasPartialText && speechLikePartial && canRenderUserSpeech) {
-        setTurnPhaseStable("user_speaking")
       }
       return
     }
@@ -2395,7 +2358,6 @@ export function App() {
       pendingSpeechAfterThinkingRef.current = false
       setPendingSpeechAfterThinking(false)
       clearSpeechWatchdog()
-      sttTrackStateRef.current.reset()
       setTurnPhaseStable(sessionRef.current && micRef.current ? "listening" : "idle")
       void hardStopPlayback()
       // Auto-start mic in free-mic mode after interruption acknowledged
@@ -2579,7 +2541,7 @@ export function App() {
     return `STT final: ${details.join(", ")}`
   }, [sttFinalMeta.deferred, sttFinalMeta.finality, sttFinalMeta.revision])
 
-  const triggerImmediateInterrupt = useCallback((source: "vad" | "stt_partial" | "stt_final" | "local_audio") => {
+  const triggerImmediateInterrupt = useCallback((source: "vad" | "stt_final" | "local_audio") => {
     const session = sessionRef.current
     if (!session) return
     const now = Date.now()
@@ -2596,7 +2558,7 @@ export function App() {
       return
     }
 
-    if (source !== "stt_final" && !interruptionPolicyRef.current.canInterrupt(now)) {
+    if (!interruptionPolicyRef.current.canInterrupt(now)) {
       return
     }
 
@@ -2610,9 +2572,7 @@ export function App() {
     const interruptEventName =
       source === "vad"
         ? "ui.auto_interrupt.vad"
-        : source === "stt_partial"
-          ? "ui.auto_interrupt.stt_partial"
-          : source === "stt_final"
+        : source === "stt_final"
             ? "ui.auto_interrupt.stt_final"
           : "ui.auto_interrupt.local_audio"
     pushTraceLocal(
@@ -3395,7 +3355,7 @@ export function App() {
         dispatchSession({ type: "setSessionIdOnly", sessionId: state.sessionId })
         dispatchSession({ type: "setSessionStatusOnly", sessionStatus: state.sessionStatus === "disconnected" ? "disconnected" : state.sessionStatus })
         dispatchSession({ type: "setListeningOnly", isListening: Boolean(micRef.current) })
-        dispatchSession({ type: "setSttLiveText", text: state.stt.interimText ?? "" })
+        dispatchSession({ type: "setSttLiveText", text: state.stt.finalText ?? "" })
         dispatchSession({ type: "setLlmThinking", text: state.llm.thinkingText, active: state.llm.phase === "thinking" || state.llm.phase === "generating" })
         dispatchSession({ type: "setLlmResponse", text: state.llm.responseText })
         dispatchSession({ type: "setCurrentSpokenSegmentOnly", currentSpokenSegment: state.tts.currentSpokenSegment ?? "" })
@@ -3565,11 +3525,12 @@ export function App() {
       sessionRef.current = null
       await connect(normalized)
       // Load transcript for the resumed session
-      if (sessionRef.current) {
+      const activeSession = sessionRef.current as WebVoiceSessionClass | null
+      if (activeSession) {
         if (cachedTranscript.length > 0) {
-          sessionRef.current.store.dispatch(toSetTranscriptAction(cachedTranscript))
+          activeSession.store.dispatch(toSetTranscriptAction(cachedTranscript))
         }
-        await loadSessionTranscript(sessionRef.current.sessionId, { setActiveTranscript: true })
+        await loadSessionTranscript(activeSession.sessionId, { setActiveTranscript: true })
       }
       setHistorySidebarOpen(false)
     } catch (error) {
@@ -4222,7 +4183,7 @@ export function App() {
 
       <TabsList aria-label="Demo tabs">
         <TabsTrigger active={mode === "detailed"} onClick={() => setMode("detailed")}>Detailed</TabsTrigger>
-        <TabsTrigger active={mode === "minimal"} onClick={() => setMode("minimal")}>Minimal</TabsTrigger>
+        <TabsTrigger active={mode !== "detailed"} onClick={() => setMode("minimal")}>Minimal</TabsTrigger>
       </TabsList>
 
       <Card className="toolbar" aria-label="SDK controls">

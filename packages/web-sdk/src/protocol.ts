@@ -251,12 +251,6 @@ export interface VadStateEvent extends BaseConversationEvent {
   silence_duration_ms?: number | null
 }
 
-export interface SttPartialEvent extends BaseConversationEvent {
-  type: "stt.partial"
-  text: string
-  confidence?: number | null
-}
-
 export interface SttFinalEvent extends BaseConversationEvent {
   type: "stt.final"
   text: string
@@ -269,10 +263,10 @@ export interface SttFinalEvent extends BaseConversationEvent {
 
 export type SttStatus =
   | "queued"
-  | "transcribing"
-  | "waiting_final"
-  | "stabilizing"
-  | "retry_scheduled"
+  | "running"
+  | "completed"
+  | "timeout"
+  | "failed"
   | (string & {})
 
 export interface SttStatusEvent extends BaseConversationEvent {
@@ -424,7 +418,6 @@ export type ConversationEvent =
   | SessionReadyEvent
   | SessionStatusEvent
   | VadStateEvent
-  | SttPartialEvent
   | SttFinalEvent
   | SttStatusEvent
   | RouteSelectedEvent

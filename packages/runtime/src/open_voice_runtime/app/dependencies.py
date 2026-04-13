@@ -18,11 +18,11 @@ import os
 from open_voice_runtime.observability.trace_sink import TraceSink
 from open_voice_runtime.session.manager import InMemorySessionManager, SessionManager
 from open_voice_runtime.session.redis import RedisSessionManager
+from open_voice_runtime.session_worker.host import WorkerHost
 from open_voice_runtime.stt.engines import MoonshineSttEngine
 from open_voice_runtime.stt.registry import SttEngineRegistry
 from open_voice_runtime.stt.service import SttService
 from open_voice_runtime.transport.websocket.handler import RealtimeConnectionHandler
-from open_voice_runtime.transport.websocket.session import RealtimeConversationSession
 from open_voice_runtime.tts.engines import KokoroTtsEngine
 from open_voice_runtime.tts.registry import TtsEngineRegistry
 from open_voice_runtime.tts.service import TtsService
@@ -45,7 +45,7 @@ class RuntimeDependencies:
     tts_service: TtsService
     session_manager: SessionManager
     engine_catalog: dict[str, list[EngineDescriptor]]
-    realtime_session: RealtimeConversationSession
+    worker_host: WorkerHost
     realtime_handler: RealtimeConnectionHandler
     trace_sink: TraceSink
 
@@ -98,7 +98,7 @@ def build_runtime_dependencies(config: RuntimeConfig | None = None) -> RuntimeDe
         tts_entries=tts_registry.list(),
     )
 
-    realtime_session = RealtimeConversationSession(
+    worker_host = WorkerHost(
         session_manager,
         config=config,
         stt_service=stt_service,
@@ -122,7 +122,7 @@ def build_runtime_dependencies(config: RuntimeConfig | None = None) -> RuntimeDe
         tts_service=tts_service,
         session_manager=session_manager,
         engine_catalog=engine_catalog,
-        realtime_session=realtime_session,
-        realtime_handler=RealtimeConnectionHandler(realtime_session, trace_sink=trace_sink),
+        worker_host=worker_host,
+        realtime_handler=RealtimeConnectionHandler(worker_host, trace_sink=trace_sink),
         trace_sink=trace_sink,
     )

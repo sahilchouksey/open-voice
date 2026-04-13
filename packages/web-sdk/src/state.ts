@@ -31,7 +31,6 @@ export interface VoiceSessionState {
     lastEventKind?: VadStateEvent["kind"]
   }
   stt: {
-    interimText: string
     finalText: string
     lastFinalTurnId?: string | null
     lastFinalText?: string | null
@@ -95,7 +94,6 @@ export function createVoiceSessionState(sessionId: string): VoiceSessionState {
       speaking: false,
     },
     stt: {
-      interimText: "",
       finalText: "",
       lastFinalTurnId: null,
       lastFinalText: null,
@@ -182,11 +180,6 @@ export function reduceVoiceSessionEvent(
       next.vad.lastEventKind = event.kind
       next.turnPhase = deriveTurnPhase(next)
       return next
-    case "stt.partial":
-      next.stt.interimText = event.text
-      next.stt.status = "transcribing"
-      next.turnPhase = deriveTurnPhase(next)
-      return next
     case "stt.status":
       next.stt.status = event.status
       next.stt.waitedMs = event.waited_ms ?? null
@@ -207,8 +200,7 @@ export function reduceVoiceSessionEvent(
       next.stt.finality = event.finality ?? null
       next.stt.deferred = event.deferred ?? null
       next.stt.previousText = event.previous_text ?? null
-      next.stt.status = "waiting_final"
-      next.stt.interimText = ""
+      next.stt.status = "completed"
       next.route = {}
       next.llm.thinkingText = ""
       next.llm.responseText = ""

@@ -8,7 +8,7 @@ from typing import Any, Protocol
 
 from open_voice_runtime.core.errors import OpenVoiceError, TransportProtocolError
 from open_voice_runtime.observability.trace_sink import TraceSink
-from open_voice_runtime.transport.websocket.session import RealtimeConversationSession
+from open_voice_runtime.session_worker.host import WorkerHost
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +173,7 @@ class RealtimeSocket(Protocol):
 
 @dataclass(slots=True)
 class RealtimeConnectionHandler:
-    session: RealtimeConversationSession
+    session: WorkerHost
     trace_sink: TraceSink | None = None
 
     async def _trace(

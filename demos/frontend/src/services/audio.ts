@@ -82,7 +82,7 @@ export class DemoMicInput {
     }) => void,
   ) {
     this.mic = new SdkBrowserMicInput({
-      sampleRateHz: 24000,
+      sampleRateHz: 16000,
       channels: 1,
       chunkSize: DEMO_CAPTURE_BUFFER_SIZE,
       analyserBandCount: AUDIO_BAND_COUNT,
@@ -117,7 +117,7 @@ export class DemoMicInput {
       await this.sendChunk({
         data: chunk.data,
         sequence: chunk.sequence,
-        encoding: chunk.encoding,
+        encoding: "pcm_s16le",
         sampleRateHz: chunk.sampleRateHz,
         channels: chunk.channels,
         durationMs: chunk.durationMs ?? 0,

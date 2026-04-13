@@ -9,7 +9,7 @@ export default defineConfig({
     viewport: { width: 1280, height: 720 },
   },
   webServer: {
-    command: 'npm run dev',
+    command: 'npm run dev -- --host 127.0.0.1 --port 4174',
     port: 4174,
     reuseExistingServer: true,
   },

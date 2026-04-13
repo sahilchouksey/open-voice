@@ -239,14 +239,14 @@ class BrowserMicInput {
     this.running = true
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        sampleRate: { ideal: 24000 },
+        sampleRate: { ideal: 16000 },
         channelCount: 1,
         echoCancellation: true,
         noiseSuppression: true,
         autoGainControl: true,
       },
     })
-    this.ctx = new AudioContext({ sampleRate: 24000 })
+    this.ctx = new AudioContext({ sampleRate: 16000 })
     this.source = this.ctx.createMediaStreamSource(this.stream)
     this.processor = this.ctx.createScriptProcessor(4096, 1, 1)
     this.processor.onaudioprocess = (event) => {
@@ -260,7 +260,7 @@ class BrowserMicInput {
         pcm[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff
       }
       if (!this.running || captureToken !== this.captureToken) return
-      const sampleRate = this.ctx?.sampleRate || 24000
+      const sampleRate = this.ctx?.sampleRate || 16000
       const sequence = this.sequence
       this.sequence += 1
       this.onLevel(peak)
@@ -1045,17 +1045,6 @@ async function handleEvent(event) {
     syncUiFromSessionState()
     return
   }
-  if (event.type === "stt.partial") {
-    resolvePendingTurn("stt.partial")
-    setBadge(els.sttState, "busy", "listening")
-    els.sttText.textContent = event.text || "..."
-    const hasPartialText = Boolean(event.text && event.text.trim())
-    state.sessionState.turnPhase = hasPartialText && state.mic
-      ? "user_speaking"
-      : (state.mic ? "listening" : "idle")
-    syncUiFromSessionState()
-    return
-  }
   if (event.type === "stt.status") {
     if (event.status === "queued") {
       setBadge(els.sttState, "busy", `queued${event.attempt ? ` (${event.attempt})` : ""}`)
@@ -1063,35 +1052,17 @@ async function handleEvent(event) {
         els.sttMeta.textContent = `Turn accepted${event.attempt ? ` (attempt ${event.attempt})` : ""}.`
       }
     }
-    if (event.status === "transcribing") {
+    if (event.status === "running") {
       setBadge(els.sttState, "busy", "transcribing")
       if (els.sttMeta) els.sttMeta.textContent = "Transcribing audio..."
     }
-    if (event.status === "waiting_final") {
-      if (els.sttMeta) els.sttMeta.textContent = "Waiting for final transcript..."
+    if (event.status === "completed") {
+      setBadge(els.sttState, "live", "completed")
+      if (els.sttMeta) els.sttMeta.textContent = "Final transcript ready."
     }
-    if (event.status === "retry_scheduled") {
-      state.pendingTurn.phase = "retry_scheduled"
-      renderPendingTurnHint()
-      if (state.pendingTurn.retryTimer) {
-        window.clearTimeout(state.pendingTurn.retryTimer)
-      }
-      const waitedMs = Number.isFinite(event.waited_ms) ? event.waited_ms : 0
-      state.pendingTurn.retryTimer = window.setTimeout(() => {
-        state.pendingTurn.retryTimer = null
-        state.pendingTurn.phase = "commit_sent"
-        renderPendingTurnHint()
-      }, Math.max(0, waitedMs))
-    }
-    if (event.status === "stabilizing") {
-      setBadge(els.sttState, "busy", "stabilizing")
-      if (els.sttMeta) {
-        const sec = Math.max(0, Math.round((event.waited_ms || 0) / 1000))
-        els.sttMeta.textContent = sec > 0 ? `Stabilizing transcript (${sec}s)...` : "Stabilizing transcript..."
-      }
-    }
-    if (event.status === "waiting_final") {
-      setBadge(els.sttState, "busy", "waiting final")
+    if (event.status === "failed" || event.status === "timeout") {
+      setBadge(els.sttState, "idle", event.status)
+      if (els.sttMeta) els.sttMeta.textContent = `STT ${event.status}.`
     }
     return
   }

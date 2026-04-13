@@ -132,7 +132,7 @@ def test_open_voice_prompt_builder_layers_runtime_and_tool_context() -> None:
 def test_default_opencode_tools_include_web_search_only() -> None:
     tools = default_opencode_tools()
 
-    assert [tool.name for tool in tools] == ["websearch"]
+    assert [tool.name for tool in tools] == ["websearch", "webfetch"]
 
 
 def test_opencode_delta_ignores_whitespace_only_snapshot_changes() -> None:

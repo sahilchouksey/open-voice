@@ -116,32 +116,13 @@ class VadStateEvent(BaseConversationEvent):
 
 
 @dataclass(slots=True)
-class SttPartialEvent(BaseConversationEvent):
-    text: str = ""
-    confidence: float | None = None
-
-    def __init__(
-        self,
-        session_id: str,
-        text: str,
-        *,
-        turn_id: str | None = None,
-        confidence: float | None = None,
-    ) -> None:
-        BaseConversationEvent.__init__(
-            self,
-            type="stt.partial",
-            session_id=session_id,
-            turn_id=turn_id,
-        )
-        self.text = text
-        self.confidence = confidence
-
-
-@dataclass(slots=True)
 class SttFinalEvent(BaseConversationEvent):
     text: str = ""
     confidence: float | None = None
+    revision: int | None = None
+    finality: str | None = None
+    deferred: bool | None = None
+    previous_text: str | None = None
 
     def __init__(
         self,
@@ -150,6 +131,10 @@ class SttFinalEvent(BaseConversationEvent):
         *,
         turn_id: str | None = None,
         confidence: float | None = None,
+        revision: int | None = None,
+        finality: str | None = None,
+        deferred: bool | None = None,
+        previous_text: str | None = None,
     ) -> None:
         BaseConversationEvent.__init__(
             self,
@@ -159,6 +144,10 @@ class SttFinalEvent(BaseConversationEvent):
         )
         self.text = text
         self.confidence = confidence
+        self.revision = revision
+        self.finality = finality
+        self.deferred = deferred
+        self.previous_text = previous_text
 
 
 @dataclass(slots=True)
@@ -632,7 +621,6 @@ ConversationEvent: TypeAlias = (
     | SessionReadyEvent
     | SessionStatusEvent
     | VadStateEvent
-    | SttPartialEvent
     | SttFinalEvent
     | SttStatusEvent
     | RouteSelectedEvent

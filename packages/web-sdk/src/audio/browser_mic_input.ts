@@ -88,7 +88,7 @@ export class BrowserMicInput {
   private readonly onChunkMeta?: (meta: BrowserMicChunkMeta) => void
 
   constructor(options: BrowserMicInputOptions = {}) {
-    this.sampleRateHz = options.sampleRateHz ?? 24000
+    this.sampleRateHz = options.sampleRateHz ?? 16000
     this.channels = options.channels ?? 1
     this.chunkSize = options.chunkSize ?? 4096
     this.analyserBandCount = options.analyserBandCount ?? 9
