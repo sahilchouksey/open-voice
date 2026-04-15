@@ -1197,6 +1197,7 @@ class _LegacyRealtimeConversationSession:
             if (
                 emit is not None
                 and final_text
+                and final_text.strip()
                 and state.status
                 in {
                     SessionStatus.TRANSCRIBING,
@@ -1207,10 +1208,12 @@ class _LegacyRealtimeConversationSession:
             ):
                 policy = _turn_queue_policy(state)
                 has_live_generation = self._has_active_generation(state.session_id)
-                # send_now should only use this replacement/queue branch when an
-                # existing generation is truly active. Otherwise this is a normal
-                # commit path for the current user turn.
-                if policy == TURN_QUEUE_POLICY_SEND_NOW and not has_live_generation:
+                # During TRANSCRIBING, only interrupt if there's a live generation
+                # to interrupt. Otherwise this is a noise-triggered commit that
+                # should just be routed normally without interrupting anything.
+                if state.status is SessionStatus.TRANSCRIBING and not has_live_generation:
+                    pass
+                elif policy == TURN_QUEUE_POLICY_SEND_NOW and not has_live_generation:
                     pass
                 else:
                     # CRITICAL FIX: Always interrupt during THINKING state
