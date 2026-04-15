@@ -112,8 +112,8 @@ def vad_config(state: SessionState) -> VadConfig:
     runtime_config = state.metadata.get("runtime_config", {})
     turn = runtime_config.get("turn_detection", {}) if isinstance(runtime_config, dict) else {}
     return VadConfig(
-        min_speech_duration_ms=int(turn.get("min_speech_duration_ms", 100)),
-        min_silence_duration_ms=int(turn.get("min_silence_duration_ms", 600)),
-        activation_threshold=float(turn.get("activation_threshold", 0.5)),
+        min_speech_duration_ms=int(turn.get("min_speech_duration_ms", 300)),
+        min_silence_duration_ms=int(turn.get("min_silence_duration_ms", 800)),
+        activation_threshold=float(turn.get("activation_threshold", 0.7)),
         chunk_size=int(turn.get("vad_chunk_size", 512)),
     )

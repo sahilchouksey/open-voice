@@ -276,10 +276,10 @@ class ThinkingAudioPlayer {
 
 const AUDIO_BAND_COUNT = 9
 const DEMO_MIN_SPEECH_DURATION_MS = 320
-const DEMO_VAD_ACTIVATION_THRESHOLD = 0.62
+const DEMO_VAD_ACTIVATION_THRESHOLD = 0.75
 const DEMO_UI_VAD_PROBABILITY_THRESHOLD = 0.78
-const DEMO_INTERRUPT_COOLDOWN_MS = 350
-const DEMO_INTERRUPT_MIN_DURATION_SECONDS = 0.12
+const DEMO_INTERRUPT_COOLDOWN_MS = 600
+const DEMO_INTERRUPT_MIN_DURATION_SECONDS = 0.25
 const DEMO_INTERRUPT_MIN_WORDS = 2
 const DEMO_LOCAL_BARGE_IN_PEAK_THRESHOLD = 0.15
 const DEMO_LOCAL_BARGE_IN_CONSECUTIVE_FRAMES = 12
@@ -2717,7 +2717,9 @@ export function App() {
 
     const agentCurrentlySpeaking =
       turnPhaseRef.current === "agent_speaking"
+      || turnPhaseRef.current === "processing"
       || sessionStatusRef.current === "speaking"
+      || sessionStatusRef.current === "transcribing"
       || sessionStatusRef.current === "thinking"
       || ttsPlayingRef.current
       || ttsStreamActiveRef.current

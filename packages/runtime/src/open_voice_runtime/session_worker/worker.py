@@ -875,7 +875,7 @@ def _turn_detection_config(state: SessionState) -> TurnDetectionConfig:
     turn = runtime_config.get("turn_detection", {}) if isinstance(runtime_config, dict) else {}
     return TurnDetectionConfig(
         mode=TurnDetectionMode.VAD_TIMEOUT,
-        min_silence_duration_ms=int(turn.get("min_silence_duration_ms", 600)),
+        min_silence_duration_ms=int(turn.get("min_silence_duration_ms", 800)),
         endpointing_mode=str(turn.get("endpointing_mode", "fixed")),
         endpointing_min_delay=float(turn.get("endpointing_min_delay", 0.5)),
         endpointing_max_delay=float(turn.get("endpointing_max_delay", 3.0)),

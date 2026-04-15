@@ -20,9 +20,9 @@ class VadCapabilities:
 
 @dataclass(frozen=True, slots=True)
 class VadConfig:
-    min_speech_duration_ms: int = 100
-    min_silence_duration_ms: int = 600
-    activation_threshold: float = 0.5
+    min_speech_duration_ms: int = 300
+    min_silence_duration_ms: int = 800
+    activation_threshold: float = 0.7
     chunk_size: int = 512
 
 
