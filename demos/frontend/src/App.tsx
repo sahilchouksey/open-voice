@@ -660,7 +660,7 @@ function envFlag(value: unknown, defaultValue = false): boolean {
 
 const FRONTEND_DIAGNOSTICS_ENABLED = envFlag(
   import.meta.env.VITE_OPEN_VOICE_FRONTEND_DIAGNOSTICS,
-  true,
+  false,
 )
 
 function isLoopbackHost(hostname: string): boolean {
