@@ -1194,6 +1194,15 @@ class _LegacyRealtimeConversationSession:
             # Handle barge-in: User spoke during active response generation
             # Only trigger when explicitly committing (not auto-commit from delayed chunks)
             # Auto-commit is blocked at _append_audio level when status is THINKING/SPEAKING
+            # TRACE DIAGNOSTIC: log what we're about to decide
+            logger.warning(
+                "TRACE_COMMIT_BARGEIN session=%s status=%s final_text=%r has_stt_events=%s gen_id=%s",
+                state.session_id,
+                state.status.value,
+                (final_text or "")[:40],
+                bool(stt_events),
+                self._response_generation_ids.get(state.session_id, "NONE"),
+            )
             if (
                 emit is not None
                 and final_text
@@ -1208,14 +1217,31 @@ class _LegacyRealtimeConversationSession:
             ):
                 policy = _turn_queue_policy(state)
                 has_live_generation = self._has_active_generation(state.session_id)
+                logger.warning(
+                    "TRACE_COMMIT_BARGEIN_ENTERED session=%s policy=%s has_live_gen=%s status=%s final_text=%r",
+                    state.session_id,
+                    policy,
+                    has_live_generation,
+                    state.status.value,
+                    (final_text or "")[:40],
+                )
                 # During TRANSCRIBING, only interrupt if there's a live generation
                 # to interrupt. Otherwise this is a noise-triggered commit that
                 # should just be routed normally without interrupting anything.
                 if state.status is SessionStatus.TRANSCRIBING and not has_live_generation:
+                    logger.warning(
+                        "TRACE_COMMIT_BARGEIN_BLOCKED: TRANSCRIBING no live gen session=%s",
+                        state.session_id,
+                    )
                     pass
                 elif policy == TURN_QUEUE_POLICY_SEND_NOW and not has_live_generation:
+                    logger.warning(
+                        "TRACE_COMMIT_BARGEIN_BLOCKED: send_now no live gen session=%s",
+                        state.session_id,
+                    )
                     pass
                 else:
+                    logger.warning("TRACE_COMMIT_BARGEIN_PROCEEDING session=%s", state.session_id)
                     # CRITICAL FIX: Always interrupt during THINKING state
                     # When user corrects themselves while LLM is thinking, we must interrupt
                     # and process the new input, not queue it.
