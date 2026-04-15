@@ -65,7 +65,9 @@ Place your machine-specific settings here. This file is **gitignored** and takes
 | `OPEN_VOICE_DEMO_HOST` | Bind address for backend server | `0.0.0.0` |
 | `OPEN_VOICE_DEMO_PORT` | Port for backend server | `8011` |
 | `PARAKEET_DEVICE` | Device for Parakeet STT engine (`cuda` or `cpu`) | `cuda` |
-| `VITE_OPEN_VOICE_FRONTEND_DIAGNOSTICS` | Enable frontend diagnostics tracing | `0` |
+| `OPEN_VOICE_TRACE_ENABLED` | Enable backend/runtime trace capture | `1` in demo backend |
+| `OPEN_VOICE_TRACE_DIR` | Directory for runtime/frontend trace output | `temp/traces` |
+| `VITE_OPEN_VOICE_FRONTEND_DIAGNOSTICS` | Enable frontend diagnostics tracing | `1` |
 
 **Example `.env.local` (Local OpenAI proxy setup):**
 

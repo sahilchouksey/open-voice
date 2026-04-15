@@ -160,6 +160,18 @@ export function reduceVoiceSessionEvent(
         next.pendingTurn.phase = "awaiting_backend"
       }
       if (
+        (event.status === "thinking"
+          || event.status === "speaking"
+          || event.status === "listening"
+          || event.status === "ready")
+        && next.pendingTurn.phase !== "idle"
+      ) {
+        next.pendingTurn.phase = "idle"
+        next.pendingTurn.clientTurnId = null
+        next.pendingTurn.startedAtMs = null
+        next.pendingTurn.elapsedMs = 0
+      }
+      if (
         (event.status === "interrupted"
           || event.status === "closed"
           || event.status === "failed")
@@ -234,6 +246,15 @@ export function reduceVoiceSessionEvent(
       return next
     case "llm.phase":
       next.llm.phase = event.phase
+      if (next.pendingTurn.phase !== "idle") {
+        next.pendingTurn.phase = "idle"
+        next.pendingTurn.clientTurnId = null
+        next.pendingTurn.startedAtMs = null
+        next.pendingTurn.elapsedMs = 0
+      }
+      next.turnPhase = deriveTurnPhase(next)
+      return next
+    case "llm.tool.update":
       if (next.pendingTurn.phase !== "idle") {
         next.pendingTurn.phase = "idle"
         next.pendingTurn.clientTurnId = null

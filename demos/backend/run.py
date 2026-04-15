@@ -49,6 +49,11 @@ os.environ.setdefault("OPEN_VOICE_OPENCODE_DIRECTORY", str(ROOT))
 # Ensure built-in websearch availability for voice mode in the demo backend.
 os.environ.setdefault("OPEN_VOICE_OPENCODE_ENABLE_EXA", "1")
 
+# Enable runtime/frontend trace capture by default in the demo so debugging
+# session timing, interruption, and state transitions is deterministic.
+os.environ.setdefault("OPEN_VOICE_TRACE_ENABLED", "1")
+os.environ.setdefault("OPEN_VOICE_TRACE_DIR", str(ROOT / "temp" / "traces"))
+
 # Use a demo-dedicated local OpenCode port so stale global daemons on :4096
 # do not get reused with outdated flags/credentials.
 os.environ.setdefault("OPENCODE_BASE_URL", "http://127.0.0.1:4098")

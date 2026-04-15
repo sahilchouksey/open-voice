@@ -297,12 +297,12 @@ const DEMO_IDLE_TRANSITION_DELAY_MS = 220
 const DEMO_SLOW_STT_STABILIZATION_MS = 160
 const DEMO_MIC_STOP_COMMIT_GRACE_MS = 1600
 const DEMO_AUTO_COMMIT_MIN_INTERVAL_MS = 400
-const DEMO_ROUTER_TIMEOUT_MS = 7000
+const DEMO_ROUTER_TIMEOUT_MS = 3000
 const DEMO_CAPTURE_BUFFER_SIZE = 4096
 const DEMO_GENERATION_WATCHDOG_TIMEOUT_MS = 90000
 const DEMO_STT_FINAL_TIMEOUT_MS = 1600
-const DEMO_LLM_FIRST_DELTA_TIMEOUT_MS = 90000
-const DEMO_LLM_TOTAL_TIMEOUT_MS = 180000
+const DEMO_LLM_FIRST_DELTA_TIMEOUT_MS = 25000
+const DEMO_LLM_TOTAL_TIMEOUT_MS = 60000
 const DEMO_ROUTER_MODE: "disabled" | "fallback_only" | "enabled" = "fallback_only"
 const DEMO_PHASE_DEBOUNCE_MS = 180
 const DEMO_FORCE_SEND_NOW_DEFAULT = true
@@ -660,7 +660,7 @@ function envFlag(value: unknown, defaultValue = false): boolean {
 
 const FRONTEND_DIAGNOSTICS_ENABLED = envFlag(
   import.meta.env.VITE_OPEN_VOICE_FRONTEND_DIAGNOSTICS,
-  false,
+  true,
 )
 
 function isLoopbackHost(hostname: string): boolean {
@@ -1080,6 +1080,7 @@ export function App() {
   const localBargeInCooldownUntilRef = useRef(0)
   const localBargeInNoiseFloorRef = useRef(0)
   const allowAutoInterruptUntilRef = useRef(0)
+  const bargeInSpeechActiveRef = useRef(false)
   const lastSpokenErrorKeyRef = useRef("")
   const lastSpokenErrorAtRef = useRef(0)
   const lastToolUpdateKeyRef = useRef("")
@@ -1623,20 +1624,12 @@ export function App() {
 
   const shouldPlayThinkingCue = useMemo(() => {
     return (
-      (
-        sessionStatus === "thinking"
-        || sessionStatus === "transcribing"
-        || llmThinkingActive
-        || pendingSpeechAfterThinking
-        || pendingTurnPhase !== "idle"
-        || turnPhase === "processing"
-      )
+      sessionStatus === "thinking"
+      && turnPhase === "processing"
       && !ttsPlaybackActive
       && !ttsStreamActive
-      && turnPhase !== "agent_speaking"
-      && turnPhase !== "user_speaking"
     )
-  }, [llmThinkingActive, pendingSpeechAfterThinking, pendingTurnPhase, sessionStatus, ttsPlaybackActive, ttsStreamActive, turnPhase])
+  }, [sessionStatus, ttsPlaybackActive, ttsStreamActive, turnPhase])
 
   useEffect(() => {
     if (!thinkingPlayerRef.current) {
@@ -1966,6 +1959,7 @@ export function App() {
     clearGenerationWatchdog()
     clearSpeechWatchdog()
     interruptionInFlightRef.current = false
+    bargeInSpeechActiveRef.current = false
     suppressTtsUntilNextUserFinalRef.current = false
     activeGenerationIdRef.current = null
     pendingSpeechAfterThinkingRef.current = false
@@ -2319,6 +2313,7 @@ export function App() {
       if (signal.text.trim()) {
         lastUserSpeechAtRef.current = now
         allowAutoInterruptUntilRef.current = 0
+        bargeInSpeechActiveRef.current = false
       }
       queueSttUiText(signal.text || "", true)
       setTurnPhaseStable("processing")
@@ -2340,7 +2335,7 @@ export function App() {
       const speechStartDetected = signal.kind === "start_of_speech" || confidentInferenceSpeech
       if (speechStartDetected) {
         allowAutoInterruptUntilRef.current = Date.now() + 700
-        if (shouldAutoBargeInterrupt && DEMO_ENABLE_VAD_AUTO_INTERRUPT && DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT && interruptionPolicyRef.current.shouldInterruptFromVad({ type: "vad.state", session_id: sessionRef.current?.sessionId ?? "", event_id: "ui-vad", timestamp: new Date().toISOString(), sequence: 0, kind: signal.kind, speaking: signal.speaking ?? false, probability: signal.probability ?? undefined })) {
+        if (!bargeInSpeechActiveRef.current && shouldAutoBargeInterrupt && DEMO_ENABLE_VAD_AUTO_INTERRUPT && DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT && interruptionPolicyRef.current.shouldInterruptFromVad({ type: "vad.state", session_id: sessionRef.current?.sessionId ?? "", event_id: "ui-vad", timestamp: new Date().toISOString(), sequence: 0, kind: signal.kind, speaking: signal.speaking ?? false, probability: signal.probability ?? undefined })) {
           triggerImmediateInterrupt("vad")
         }
         // Allow user_speaking even during interruption or when session is thinking
@@ -2351,6 +2346,7 @@ export function App() {
           setTurnPhaseStable("user_speaking")
         }
       } else if (signal.kind === "end_of_speech" && signal.speaking === false) {
+        bargeInSpeechActiveRef.current = false
         const hadRecentUserSpeech = Date.now() - lastUserSpeechAtRef.current <= DEMO_MIC_STOP_COMMIT_GRACE_MS
         const speakingWindowMs = Date.now() - vadSpeechStartedAtRef.current
         const isVoiceLikeSegment = speakingWindowMs >= DEMO_MIN_SPEECH_DURATION_MS
@@ -2731,6 +2727,10 @@ export function App() {
       return
     }
 
+    if (bargeInSpeechActiveRef.current) {
+      return
+    }
+
     if (!interruptionPolicyRef.current.canInterrupt(now)) {
       return
     }
@@ -2739,6 +2739,7 @@ export function App() {
     localBargeInCooldownUntilRef.current = now + DEMO_LOCAL_BARGE_IN_COOLDOWN_MS
     allowAutoInterruptUntilRef.current = 0
     interruptionInFlightRef.current = true
+    bargeInSpeechActiveRef.current = true
     suppressTtsUntilNextUserFinalRef.current = true
     interruptionPolicyRef.current.markInterrupted(now)
     rejectGeneration(activeGenerationIdRef.current)
@@ -2995,8 +2996,14 @@ export function App() {
           }
 
           const agentAudioPlaying = ttsPlayingRef.current || ttsStreamActiveRef.current
+          const agentThinking =
+            sessionStatusRef.current === "thinking"
+            || llmThinkingActiveRef.current
+            || pendingSpeechAfterThinkingRef.current
+            || turnPhaseRef.current === "processing"
+          const agentInterruptible = agentAudioPlaying || agentThinking
 
-          if (!agentAudioPlaying || interruptionInFlightRef.current) {
+          if (!agentInterruptible || interruptionInFlightRef.current) {
             localBargeInFramesRef.current = 0
             localBargeInNoiseFloorRef.current = normalizedLevel
             return
@@ -3020,7 +3027,7 @@ export function App() {
             return
           }
 
-          if (now > allowAutoInterruptUntilRef.current) {
+          if (agentAudioPlaying && now > allowAutoInterruptUntilRef.current) {
             localBargeInFramesRef.current = 0
             return
           }
@@ -3037,6 +3044,7 @@ export function App() {
                 "ui.auto_interrupt.local_audio",
                 {
                   session_id: sessionRef.current?.sessionId ?? null,
+                  phase: agentAudioPlaying ? "speaking" : "thinking",
                   peak: Number(normalizedLevel.toFixed(3)),
                   floor: Number(nextFloor.toFixed(3)),
                   threshold: Number(dynamicThreshold.toFixed(3)),
@@ -3368,6 +3376,7 @@ export function App() {
     setSttFinalMetaState({ revision: null, finality: null, deferred: null, previousText: null })
     activeAssistantTurnIdRef.current = null
     interruptionInFlightRef.current = false
+    bargeInSpeechActiveRef.current = false
     suppressTtsUntilNextUserFinalRef.current = false
     activeGenerationIdRef.current = null
     rejectedGenerationIdsRef.current.clear()
@@ -3633,6 +3642,7 @@ export function App() {
       clearSpeechWatchdog()
       activeAssistantTurnIdRef.current = null
       interruptionInFlightRef.current = false
+      bargeInSpeechActiveRef.current = false
       setPendingTurnPhase("idle")
       setPendingTurnElapsedMs(0)
       pendingTurnTracePhaseRef.current = "idle"
