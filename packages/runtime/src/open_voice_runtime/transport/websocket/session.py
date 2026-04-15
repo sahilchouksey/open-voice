@@ -386,19 +386,34 @@ class _LegacyRealtimeConversationSession:
             # CRITICAL FIX: Use same threshold for THINKING and SPEAKING
             # The previous 0.85 threshold during THINKING was too high and missed speech
             # User should be able to interrupt the LLM by speaking at any time
-            min_probability = 0.5
+            min_probability = 0.7
             speech_detected = _contains_vad_speech(
                 pre_commit_vad_events, min_probability=min_probability
             )
 
-            # In send_now speaking mode, require explicit START_OF_SPEECH to avoid
-            # false barge-ins from noisy inference-only VAD spikes.
+            # Require explicit START_OF_SPEECH for barge-in to avoid
+            # false interrupts from noisy inference-only VAD spikes.
             min_duration_seconds = max(0.0, float(interrupt_cfg.get("min_duration", 0.0)))
             require_explicit_barge_start = strict_speaking_barge_in
             if require_explicit_barge_start and not _contains_vad_barge_in_start(
                 pre_commit_vad_events
             ):
                 speech_detected = False
+
+            # NOISE GUARD: In send_now mode, require at least one confirmed STT final
+            # before allowing a VAD-only interrupt. Without any STT text, VAD-only
+            # triggers are almost certainly background noise cancelling real work.
+            if speech_detected and policy == TURN_QUEUE_POLICY_SEND_NOW:
+                has_confirmed_stt = bool(
+                    self._turns.buffered_final_text(message.session_id)
+                    or self._turns.final_segment_count(message.session_id) > 0
+                )
+                if not has_confirmed_stt:
+                    speech_detected = False
+                    logger.debug(
+                        "send_now interrupt blocked - no confirmed STT text session=%s",
+                        message.session_id,
+                    )
 
             if vad_stream is None:
                 speech_detected = True
