@@ -342,6 +342,18 @@ class _LegacyRealtimeConversationSession:
                         self._turns.seed_final_text(message.session_id, latest_final_text)
                 return status_events
 
+            # NOISE GUARD: In send_now mode, if there's an active generation but we
+            # have NO confirmed STT text, the "generation" is likely from a noise-triggered
+            # auto-commit that is still being transcribed. Block the interrupt to prevent
+            # a cascade of noise → commit → send_now interrupt → stt.empty.
+            if policy == TURN_QUEUE_POLICY_SEND_NOW and state.status is SessionStatus.LISTENING:
+                has_confirmed_stt = bool(
+                    self._turns.buffered_final_text(message.session_id)
+                    or self._turns.final_segment_count(message.session_id) > 0
+                )
+                if not has_confirmed_stt:
+                    return status_events
+
             # Don't allow interrupting a turn that was created after an interrupt
             # This prevents the chain reaction where continuous speech after an interrupt
             # causes the new turn to be immediately interrupted when it enters THINKING
