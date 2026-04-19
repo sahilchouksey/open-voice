@@ -991,6 +991,20 @@ class _LegacyRealtimeConversationSession:
         emit: ConversationEventEmitter | None = None,
     ) -> list[ConversationEvent]:
         state = await self._sessions.get(message.session_id)
+        # Hard guard: if the client sends a late audio.commit while this session is
+        # already transcribing a runtime-owned commit, ignore it. This prevents a
+        # second commit from turning a noise-triggered VAD segment into a send_now
+        # interruption cascade.
+        if message.client_turn_id and state.status is SessionStatus.TRANSCRIBING:
+            commit_started_at = self._stt_commit_started_at.get(state.session_id)
+            if commit_started_at is not None:
+                logger.warning(
+                    "Ignoring late client audio.commit during transcribing "
+                    "session=%s client_turn_id=%s",
+                    state.session_id,
+                    message.client_turn_id,
+                )
+                return []
         retry_enabled = False
         retry_after_ms = 0
         client_turn_id = _safe_str(message.client_turn_id)
