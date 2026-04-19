@@ -1066,6 +1066,7 @@ export function App() {
   const minimalMicUserControlledRef = useRef(false)
   const sessionStatusRef = useRef(sessionStatus)
   const turnPhaseRef = useRef<TurnPhase>(turnPhase)
+  const localUserSpeechVisualUntilRef = useRef(0)
   const traceReporterRef = useRef<FrontendTraceReporter | null>(null)
   const disconnectForCleanupRef = useRef<(() => Promise<void>) | null>(null)
   const minimalSettingsRef = useRef<HTMLDivElement | null>(null)
@@ -1147,12 +1148,13 @@ export function App() {
     || sessionStatus === "thinking"
     || sessionStatus === "transcribing"
   const visualTurnPhase = useMemo<TurnPhase>(() => {
+    const localUserSpeechActive = Date.now() < localUserSpeechVisualUntilRef.current && Boolean(micRef.current)
+    // If user is actively speaking, respect that state
+    if (turnPhase === "user_speaking" || localUserSpeechActive) {
+      return "user_speaking"
+    }
     if (ttsPlaybackActive || ttsStreamActive) {
       return "agent_speaking"
-    }
-    // If user is actively speaking, respect that state
-    if (turnPhase === "user_speaking") {
-      return "user_speaking"
     }
     // Never force listening/idle while still processing or speaking.
     if (turnPhase === "processing" || turnPhase === "agent_speaking") {
@@ -3007,6 +3009,14 @@ export function App() {
         (level) => {
           const normalizedLevel = Math.max(0, level)
           queueMicLevelUi(Math.min(100, Math.round(level * 140)))
+          if (normalizedLevel >= 0.035 && micRef.current) {
+            const now = Date.now()
+            localUserSpeechVisualUntilRef.current = now + 220
+            lastUserSpeechAtRef.current = now
+            if (turnPhaseRef.current !== "user_speaking") {
+              setTurnPhaseStable("user_speaking")
+            }
+          }
 
           if (effectiveQueuePolicy !== "send_now") {
             localBargeInFramesRef.current = 0
