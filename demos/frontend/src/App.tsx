@@ -288,7 +288,7 @@ const DEMO_LOCAL_BARGE_IN_FLOOR_ALPHA = 0.08
 const DEMO_LOCAL_BARGE_IN_FLOOR_MULTIPLIER = 2.2
 const DEMO_LOCAL_BARGE_IN_FLOOR_BIAS = 0.04
 const DEMO_ENABLE_STT_PARTIAL_AUTO_INTERRUPT = true
-const DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT = false
+const DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT = true
 const DEMO_ENABLE_VAD_AUTO_INTERRUPT = false
 const DEMO_STT_TRANSCRIPT_TIMEOUT_MS = 2000
 const DEMO_MIN_SILENCE_DURATION_MS = 1400
@@ -2340,7 +2340,7 @@ export function App() {
       const speechStartDetected = signal.kind === "start_of_speech" || confidentInferenceSpeech
       if (speechStartDetected) {
         allowAutoInterruptUntilRef.current = Date.now() + 700
-        if (!bargeInSpeechActiveRef.current && shouldAutoBargeInterrupt && DEMO_ENABLE_VAD_AUTO_INTERRUPT && DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT && interruptionPolicyRef.current.shouldInterruptFromVad({ type: "vad.state", session_id: sessionRef.current?.sessionId ?? "", event_id: "ui-vad", timestamp: new Date().toISOString(), sequence: 0, kind: signal.kind, speaking: signal.speaking ?? false, probability: signal.probability ?? undefined })) {
+        if (!bargeInSpeechActiveRef.current && shouldAutoBargeInterrupt && DEMO_ENABLE_VAD_AUTO_INTERRUPT && interruptionPolicyRef.current.shouldInterruptFromVad({ type: "vad.state", session_id: sessionRef.current?.sessionId ?? "", event_id: "ui-vad", timestamp: new Date().toISOString(), sequence: 0, kind: signal.kind, speaking: signal.speaking ?? false, probability: signal.probability ?? undefined })) {
           triggerImmediateInterrupt("vad")
         }
         // Allow user_speaking even during interruption or when session is thinking
