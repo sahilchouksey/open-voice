@@ -2348,10 +2348,12 @@ export function App() {
         const canRenderUserSpeech = micRef.current
         if (canRenderUserSpeech) {
           lastUserSpeechAtRef.current = Date.now()
+          localUserSpeechVisualUntilRef.current = Date.now() + 180
           setTurnPhaseStable("user_speaking")
         }
       } else if (signal.kind === "end_of_speech" && signal.speaking === false) {
         bargeInSpeechActiveRef.current = false
+        localUserSpeechVisualUntilRef.current = 0
         const hadRecentUserSpeech = Date.now() - lastUserSpeechAtRef.current <= DEMO_MIC_STOP_COMMIT_GRACE_MS
         const speakingWindowMs = Date.now() - vadSpeechStartedAtRef.current
         const isVoiceLikeSegment = speakingWindowMs >= DEMO_MIN_SPEECH_DURATION_MS
@@ -2370,6 +2372,16 @@ export function App() {
           const clientTurnId = `ct_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
           lastAutoCommitAtRef.current = Date.now()
           agentRef.current?.commit(undefined, clientTurnId)
+        }
+        if (micRef.current) {
+          const backendProcessingLikeNow =
+            llmThinkingActiveRef.current
+            || pendingSpeechAfterThinkingRef.current
+            || pendingTurnPhaseRef.current !== "idle"
+            || sessionStatusRef.current === "thinking"
+            || sessionStatusRef.current === "transcribing"
+          const nextPhase: TurnPhase = backendProcessingLikeNow ? "processing" : "listening"
+          setTurnPhaseStable(nextPhase)
         }
       } else if (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready") {
         const nextPhase = (() => {
@@ -3007,7 +3019,6 @@ export function App() {
           if (normalizedLevel >= 0.06 && micRef.current) {
             const now = Date.now()
             localUserSpeechVisualUntilRef.current = now + 140
-            lastUserSpeechAtRef.current = now
           }
 
           if (effectiveQueuePolicy !== "send_now") {
