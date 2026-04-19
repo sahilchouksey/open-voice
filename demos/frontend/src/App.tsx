@@ -1995,15 +1995,24 @@ export function App() {
     const dedupeKey = `${code ?? ""}:${spokenMessage}`.toLowerCase()
     const now = Date.now()
     const isTimeoutError = (code ?? "").toLowerCase() === "timeout"
+    const isProviderLikeError = normalizedJoined.includes("provider_error") || normalizedJoined.includes("provider error") || normalizedJoined.includes("all accounts are currently unavailable")
     const underGlobalCooldown = now < suppressErrorSpeechUntilRef.current
     const shouldSpeak = !underGlobalCooldown && (isTimeoutError || dedupeKey !== lastSpokenErrorKeyRef.current || now - lastSpokenErrorAtRef.current > 5000)
+    const liveMicOrSessionActive = Boolean(
+      micRef.current
+      || (sessionRef.current && sessionStatusRef.current !== "disconnected")
+    )
     if (shouldSpeak) {
       lastSpokenErrorKeyRef.current = dedupeKey
       lastSpokenErrorAtRef.current = now
       if (isRateLimitLike) {
         suppressErrorSpeechUntilRef.current = now + DEMO_ERROR_SPEECH_COOLDOWN_MS
       }
-      const speakWithBrowserFallback = () => {
+
+      // Do not create a synthetic runtime TTS turn for provider/LLM errors.
+      // It forces the UI into speaking/agent_speaking even though there is no
+      // real model response, and it masks live user speech on subsequent turns.
+      if (!liveMicOrSessionActive && !isProviderLikeError) {
         try {
           if ("speechSynthesis" in window) {
             window.speechSynthesis.cancel()
@@ -2018,24 +2027,8 @@ export function App() {
           // best-effort browser speech fallback
         }
       }
-      try {
-        agentRef.current?.say(spokenMessage, {
-          interruptCurrent: false,
-          reason: "llm_error",
-        })
-        clearErrorSpeechFallbackTimer()
-        errorSpeechFallbackTimerRef.current = window.setTimeout(() => {
-          errorSpeechFallbackTimerRef.current = null
-          if (!ttsPlayingRef.current && !ttsStreamActiveRef.current) {
-            speakWithBrowserFallback()
-          }
-        }, 900)
-      } catch {
-        speakWithBrowserFallback()
-      }
     }
   }, [
-    clearErrorSpeechFallbackTimer,
     clearGenerationWatchdog,
     clearLlmResponseUiTimer,
     clearLlmThinkingUiTimer,
