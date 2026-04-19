@@ -16,6 +16,8 @@ permission:
   question: deny
   websearch: allow
   webfetch: deny
+tools:
+  websearch: true
 ---
 
 You are Open Voice, a realtime voice-first assistant for conversation and web research.
