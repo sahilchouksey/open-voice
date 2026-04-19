@@ -1880,7 +1880,8 @@ export function App() {
 
   const setTurnPhaseStable = useCallback((phase: TurnPhase) => {
     // SDK selectTurnPhase is the canonical source of truth.
-    // Keep only local timing markers for diagnostics/visual smoothing decisions.
+    // Also keep a local override so the UI can react immediately to local mic
+    // evidence instead of waiting for a backend VAD round-trip.
     const now = Date.now()
     turnPhaseLastSetAtRef.current = now
     if (phase === "agent_speaking") {
@@ -1890,7 +1891,10 @@ export function App() {
     } else {
       turnPhaseStickyUntilRef.current = now
     }
-  }, [])
+    if (turnPhaseRef.current !== phase) {
+      setTurnPhase(phase)
+    }
+  }, [setTurnPhase])
 
   const clearGenerationWatchdog = useCallback(() => {
     if (generationWatchdogTimerRef.current !== null) {
@@ -2150,7 +2154,8 @@ export function App() {
         activeGenerationIdRef.current = signal.generationId
       }
       if (signal.status === "transcribing" || signal.status === "thinking") {
-        setTurnPhaseStable("processing")
+        const recentUserSpeech = Date.now() - lastUserSpeechAtRef.current <= 900 && micRef.current
+        setTurnPhaseStable(recentUserSpeech ? "user_speaking" : "processing")
       } else if (signal.status === "speaking") {
         if (!suppressTtsUntilNextUserFinalRef.current) {
           const hasAudiblePlayback = ttsPlayingRef.current || ttsStreamActiveRef.current
@@ -2183,6 +2188,9 @@ export function App() {
           }
           const recentUserSpeech =
             Date.now() - lastUserSpeechAtRef.current <= DEMO_POST_RELEASE_PROCESSING_GRACE_MS
+          if (recentUserSpeech && micRef.current) {
+            return "user_speaking" as TurnPhase
+          }
           if (turnPhaseRef.current === "processing" && recentUserSpeech) {
             return "processing" as TurnPhase
           }
@@ -3005,7 +3013,7 @@ export function App() {
             || turnPhaseRef.current === "processing"
           const agentInterruptible = agentAudioPlaying || agentThinking
 
-          if (!agentInterruptible || interruptionInFlightRef.current) {
+          if (!agentInterruptible) {
             localBargeInFramesRef.current = 0
             localBargeInNoiseFloorRef.current = normalizedLevel
             return
@@ -3025,6 +3033,20 @@ export function App() {
           )
 
           const now = Date.now()
+          const uiSpeechThreshold = Math.max(0.08, Math.min(0.32, dynamicThreshold * 0.65))
+          const localUiSpeechDetected = normalizedLevel >= uiSpeechThreshold
+          if (localUiSpeechDetected) {
+            lastUserSpeechAtRef.current = now
+            if (micRef.current) {
+              setTurnPhaseStable("user_speaking")
+            }
+          }
+
+          if (interruptionInFlightRef.current) {
+            localBargeInFramesRef.current = 0
+            return
+          }
+
           if (now < localBargeInCooldownUntilRef.current) {
             return
           }
