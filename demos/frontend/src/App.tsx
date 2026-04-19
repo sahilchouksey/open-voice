@@ -2151,8 +2151,8 @@ export function App() {
         activeGenerationIdRef.current = signal.generationId
       }
       if (signal.status === "transcribing" || signal.status === "thinking") {
-        const recentUserSpeech = Date.now() - lastUserSpeechAtRef.current <= 900 && micRef.current
-        setTurnPhaseStable(recentUserSpeech ? "user_speaking" : "processing")
+        localUserSpeechVisualUntilRef.current = 0
+        setTurnPhaseStable("processing")
       } else if (signal.status === "speaking") {
         if (!suppressTtsUntilNextUserFinalRef.current) {
           const hasAudiblePlayback = ttsPlayingRef.current || ttsStreamActiveRef.current
