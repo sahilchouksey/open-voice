@@ -1148,9 +1148,11 @@ export function App() {
     || sessionStatus === "thinking"
     || sessionStatus === "transcribing"
   const visualTurnPhase = useMemo<TurnPhase>(() => {
-    const localUserSpeechActive = Date.now() < localUserSpeechVisualUntilRef.current && Boolean(micRef.current)
+    const now = Date.now()
+    const localUserSpeechActive = now < localUserSpeechVisualUntilRef.current && Boolean(micRef.current)
+    const recentUserSpeech = now - lastUserSpeechAtRef.current <= 220 && Boolean(micRef.current)
     // If user is actively speaking, respect that state
-    if (turnPhase === "user_speaking" || localUserSpeechActive) {
+    if ((turnPhase === "user_speaking" && recentUserSpeech) || localUserSpeechActive) {
       return "user_speaking"
     }
     if (ttsPlaybackActive || ttsStreamActive) {
@@ -3002,13 +3004,10 @@ export function App() {
         (level) => {
           const normalizedLevel = Math.max(0, level)
           queueMicLevelUi(Math.min(100, Math.round(level * 140)))
-          if (normalizedLevel >= 0.035 && micRef.current) {
+          if (normalizedLevel >= 0.06 && micRef.current) {
             const now = Date.now()
-            localUserSpeechVisualUntilRef.current = now + 220
+            localUserSpeechVisualUntilRef.current = now + 140
             lastUserSpeechAtRef.current = now
-            if (turnPhaseRef.current !== "user_speaking") {
-              setTurnPhaseStable("user_speaking")
-            }
           }
 
           if (effectiveQueuePolicy !== "send_now") {
@@ -3050,6 +3049,7 @@ export function App() {
           if (localUiSpeechDetected) {
             lastUserSpeechAtRef.current = now
             if (micRef.current) {
+              localUserSpeechVisualUntilRef.current = Math.max(localUserSpeechVisualUntilRef.current, now + 140)
               setTurnPhaseStable("user_speaking")
             }
           }
