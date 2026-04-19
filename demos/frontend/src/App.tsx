@@ -316,7 +316,7 @@ const DEMO_UI_BAND_INTERVAL_MS = 16
 const DEMO_ERROR_SPEECH_COOLDOWN_MS = 12000
 const DEMO_MIC_CAPTURE_STALE_MS = 2600
 
-const DEMO_SEND_NOW_RUNTIME_OWNED_COMMIT = false
+const DEMO_SEND_NOW_RUNTIME_OWNED_COMMIT = true
 const MINIMAL_CAPTIONS_STORAGE_KEY = "openvoice.minimal.captions"
 const MINIMAL_DETAIL_STORAGE_KEY = "openvoice.minimal.detail"
 const LOCAL_SESSION_HISTORY_STORAGE_KEY = "openvoice.session_history.v1"
