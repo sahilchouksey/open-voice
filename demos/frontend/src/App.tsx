@@ -2360,7 +2360,16 @@ export function App() {
         const isVoiceLikeSegment = speakingWindowMs >= DEMO_MIN_SPEECH_DURATION_MS
         const autoCommitCooldownSatisfied = Date.now() - lastAutoCommitAtRef.current >= DEMO_AUTO_COMMIT_MIN_INTERVAL_MS
         const canStartPendingTurn = pendingTurnPhase === "idle"
-        if (sessionRef.current && micRef.current && (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready") && hadRecentUserSpeech && isVoiceLikeSegment && autoCommitCooldownSatisfied && canStartPendingTurn && !DEMO_SEND_NOW_RUNTIME_OWNED_COMMIT) {
+        if (
+          !DEMO_SEND_NOW_RUNTIME_OWNED_COMMIT
+          && sessionRef.current
+          && micRef.current
+          && (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready")
+          && hadRecentUserSpeech
+          && isVoiceLikeSegment
+          && autoCommitCooldownSatisfied
+          && canStartPendingTurn
+        ) {
           const clientTurnId = `ct_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
           lastAutoCommitAtRef.current = Date.now()
           agentRef.current?.commit(undefined, clientTurnId)
@@ -3160,10 +3169,10 @@ export function App() {
     }
 
     const shouldCommitOnStop =
-      Boolean(sessionRef.current)
+      !DEMO_SEND_NOW_RUNTIME_OWNED_COMMIT
+      && Boolean(sessionRef.current)
       && !isDisconnectingRef.current
       && Date.now() - lastUserSpeechAtRef.current <= DEMO_MIC_STOP_COMMIT_GRACE_MS
-      && !DEMO_SEND_NOW_RUNTIME_OWNED_COMMIT
     if (shouldCommitOnStop) {
       const clientTurnId = `ct_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
       pushTraceLocal(
