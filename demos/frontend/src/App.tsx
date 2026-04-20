@@ -282,7 +282,7 @@ const DEMO_INTERRUPT_COOLDOWN_MS = 600
 const DEMO_INTERRUPT_MIN_DURATION_SECONDS = 0.25
 const DEMO_INTERRUPT_MIN_WORDS = 2
 const DEMO_LOCAL_BARGE_IN_PEAK_THRESHOLD = 0.15
-const DEMO_LOCAL_BARGE_IN_CONSECUTIVE_FRAMES = 12
+const DEMO_LOCAL_BARGE_IN_CONSECUTIVE_FRAMES = 8
 const DEMO_LOCAL_BARGE_IN_COOLDOWN_MS = 1000
 const DEMO_LOCAL_BARGE_IN_FLOOR_ALPHA = 0.08
 const DEMO_LOCAL_BARGE_IN_FLOOR_MULTIPLIER = 2.2
@@ -3074,12 +3074,10 @@ export function App() {
             return
           }
 
-          if (agentAudioPlaying && now > allowAutoInterruptUntilRef.current) {
-            localBargeInFramesRef.current = 0
-            return
-          }
-
-          if (!DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT) {
+          // Local audio barge-in is only used to stop active assistant speech quickly.
+          // Thinking interruptions should continue to rely on VAD/STT-confirmed paths so
+          // we do not prematurely interrupt while the user is still forming a turn.
+          if (!DEMO_ENABLE_LOCAL_AUDIO_AUTO_INTERRUPT || !agentAudioPlaying) {
             localBargeInFramesRef.current = 0
             return
           }
