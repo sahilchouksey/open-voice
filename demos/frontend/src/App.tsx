@@ -3060,10 +3060,18 @@ export function App() {
           )
 
           const now = Date.now()
-          const uiSpeechThreshold = Math.max(0.18, Math.min(0.38, dynamicThreshold * 0.95))
+          const uiSpeechThreshold = Math.max(0.16, Math.min(0.34, dynamicThreshold * 0.85))
           const localUiSpeechDetected = normalizedLevel >= uiSpeechThreshold
           if (localUiSpeechDetected) {
             recentLocalUiSpeechAtRef.current = now
+            if (micRef.current) {
+              // Short-lived live speaking hint only. Do not extend the long speech
+              // grace windows here, or fan/cooler noise will stick as user_speaking.
+              localUserSpeechVisualUntilRef.current = Math.max(localUserSpeechVisualUntilRef.current, now + 90)
+              if (agentAudioPlaying || sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready") {
+                setTurnPhaseStable("user_speaking")
+              }
+            }
           }
 
           if (interruptionInFlightRef.current) {
