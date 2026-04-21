@@ -1153,7 +1153,7 @@ export function App() {
     const localUserSpeechActive = now < localUserSpeechVisualUntilRef.current && Boolean(micRef.current)
     const recentUserSpeech = now - lastUserSpeechAtRef.current <= 220 && Boolean(micRef.current)
     // If user is actively speaking, respect that state
-    if ((turnPhase === "user_speaking" && recentUserSpeech) || localUserSpeechActive) {
+    if (turnPhase === "user_speaking" && (recentUserSpeech || localUserSpeechActive)) {
       return "user_speaking"
     }
     if (ttsPlaybackActive || ttsStreamActive) {
@@ -2185,10 +2185,7 @@ export function App() {
             return "processing" as TurnPhase
           }
           const recentUserSpeech =
-            Date.now() - lastUserSpeechAtRef.current <= DEMO_POST_RELEASE_PROCESSING_GRACE_MS
-          if (recentUserSpeech && micRef.current) {
-            return "user_speaking" as TurnPhase
-          }
+            Date.now() - lastUserSpeechAtRef.current <= 220
           if (turnPhaseRef.current === "processing" && recentUserSpeech) {
             return "processing" as TurnPhase
           }
@@ -2229,7 +2226,7 @@ export function App() {
       ) {
         // now derived from SDK state
         // Check if user was recently speaking before setting to idle
-        const recentUserSpeech = Date.now() - lastUserSpeechAtRef.current <= 1500 && micRef.current
+        const recentUserSpeech = Date.now() - lastUserSpeechAtRef.current <= 220 && micRef.current
         const nextPhase = recentUserSpeech ? "user_speaking" as TurnPhase : "idle" as TurnPhase
         setTurnPhaseStable(nextPhase)
         pendingSpeechAfterThinkingRef.current = false
@@ -2348,7 +2345,7 @@ export function App() {
         // as long as mic is active and user is actually speaking
         const canRenderUserSpeech =
           micRef.current
-          && Date.now() - recentLocalUiSpeechAtRef.current <= 220
+          && Date.now() - recentLocalUiSpeechAtRef.current <= 180
         if (canRenderUserSpeech) {
           lastUserSpeechAtRef.current = Date.now()
           localUserSpeechVisualUntilRef.current = Date.now() + 180
@@ -3020,9 +3017,9 @@ export function App() {
         (level) => {
           const normalizedLevel = Math.max(0, level)
           queueMicLevelUi(Math.min(100, Math.round(level * 140)))
-          if (normalizedLevel >= 0.12 && micRef.current) {
+          if (normalizedLevel >= 0.18 && micRef.current) {
             const now = Date.now()
-            localUserSpeechVisualUntilRef.current = now + 140
+            localUserSpeechVisualUntilRef.current = now + 80
           }
 
           if (effectiveQueuePolicy !== "send_now") {
@@ -3063,15 +3060,10 @@ export function App() {
           )
 
           const now = Date.now()
-          const uiSpeechThreshold = Math.max(0.12, Math.min(0.32, dynamicThreshold * 0.75))
+          const uiSpeechThreshold = Math.max(0.18, Math.min(0.38, dynamicThreshold * 0.95))
           const localUiSpeechDetected = normalizedLevel >= uiSpeechThreshold
           if (localUiSpeechDetected) {
-            lastUserSpeechAtRef.current = now
             recentLocalUiSpeechAtRef.current = now
-            if (micRef.current) {
-              localUserSpeechVisualUntilRef.current = Math.max(localUserSpeechVisualUntilRef.current, now + 140)
-              setTurnPhaseStable("user_speaking")
-            }
           }
 
           if (interruptionInFlightRef.current) {
@@ -3134,7 +3126,7 @@ export function App() {
         freeWanted: freeMicWantedRef.current,
       })
       // Keep user_speaking if user was recently speaking
-      const recentUserSpeech = Date.now() - lastUserSpeechAtRef.current <= 1500
+      const recentUserSpeech = Date.now() - lastUserSpeechAtRef.current <= 220
       if (sessionStatusRef.current === "listening" || sessionStatusRef.current === "ready") {
         setTurnPhaseStable(recentUserSpeech ? "user_speaking" : "listening")
       }
