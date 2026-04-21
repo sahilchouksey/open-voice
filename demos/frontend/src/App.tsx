@@ -282,7 +282,7 @@ const DEMO_INTERRUPT_COOLDOWN_MS = 600
 const DEMO_INTERRUPT_MIN_DURATION_SECONDS = 0.25
 const DEMO_INTERRUPT_MIN_WORDS = 2
 const DEMO_LOCAL_BARGE_IN_PEAK_THRESHOLD = 0.15
-const DEMO_LOCAL_BARGE_IN_CONSECUTIVE_FRAMES = 8
+const DEMO_LOCAL_BARGE_IN_CONSECUTIVE_FRAMES = 2
 const DEMO_LOCAL_BARGE_IN_COOLDOWN_MS = 1000
 const DEMO_LOCAL_BARGE_IN_FLOOR_ALPHA = 0.08
 const DEMO_LOCAL_BARGE_IN_FLOOR_MULTIPLIER = 2.2
@@ -1080,6 +1080,7 @@ export function App() {
   const localBargeInFramesRef = useRef(0)
   const localBargeInCooldownUntilRef = useRef(0)
   const localBargeInNoiseFloorRef = useRef(0)
+  const recentLocalUiSpeechAtRef = useRef(0)
   const allowAutoInterruptUntilRef = useRef(0)
   const bargeInSpeechActiveRef = useRef(false)
   const lastSpokenErrorKeyRef = useRef("")
@@ -2345,7 +2346,9 @@ export function App() {
         }
         // Allow user_speaking even during interruption or when session is thinking
         // as long as mic is active and user is actually speaking
-        const canRenderUserSpeech = micRef.current
+        const canRenderUserSpeech =
+          micRef.current
+          && Date.now() - recentLocalUiSpeechAtRef.current <= 220
         if (canRenderUserSpeech) {
           lastUserSpeechAtRef.current = Date.now()
           localUserSpeechVisualUntilRef.current = Date.now() + 180
@@ -2354,6 +2357,7 @@ export function App() {
       } else if (signal.kind === "end_of_speech" && signal.speaking === false) {
         bargeInSpeechActiveRef.current = false
         localUserSpeechVisualUntilRef.current = 0
+        recentLocalUiSpeechAtRef.current = 0
         const hadRecentUserSpeech = Date.now() - lastUserSpeechAtRef.current <= DEMO_MIC_STOP_COMMIT_GRACE_MS
         const speakingWindowMs = Date.now() - vadSpeechStartedAtRef.current
         const isVoiceLikeSegment = speakingWindowMs >= DEMO_MIN_SPEECH_DURATION_MS
@@ -3016,7 +3020,7 @@ export function App() {
         (level) => {
           const normalizedLevel = Math.max(0, level)
           queueMicLevelUi(Math.min(100, Math.round(level * 140)))
-          if (normalizedLevel >= 0.06 && micRef.current) {
+          if (normalizedLevel >= 0.12 && micRef.current) {
             const now = Date.now()
             localUserSpeechVisualUntilRef.current = now + 140
           }
@@ -3027,7 +3031,11 @@ export function App() {
             return
           }
 
-          const agentAudioPlaying = ttsPlayingRef.current || ttsStreamActiveRef.current
+          const agentAudioPlaying =
+            ttsPlayingRef.current
+            || ttsStreamActiveRef.current
+            || turnPhaseRef.current === "agent_speaking"
+            || sessionStatusRef.current === "speaking"
           const agentThinking =
             sessionStatusRef.current === "thinking"
             || llmThinkingActiveRef.current
@@ -3055,10 +3063,11 @@ export function App() {
           )
 
           const now = Date.now()
-          const uiSpeechThreshold = Math.max(0.08, Math.min(0.32, dynamicThreshold * 0.65))
+          const uiSpeechThreshold = Math.max(0.12, Math.min(0.32, dynamicThreshold * 0.75))
           const localUiSpeechDetected = normalizedLevel >= uiSpeechThreshold
           if (localUiSpeechDetected) {
             lastUserSpeechAtRef.current = now
+            recentLocalUiSpeechAtRef.current = now
             if (micRef.current) {
               localUserSpeechVisualUntilRef.current = Math.max(localUserSpeechVisualUntilRef.current, now + 140)
               setTurnPhaseStable("user_speaking")
